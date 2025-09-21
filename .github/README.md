@@ -40,6 +40,11 @@ Configure these secrets in your GitHub repository settings (`Settings > Secrets 
 | `TF_STATE_CONTAINER_NAME` | Blob container name | `tfstate` |
 | `TF_STATE_KEY` | State file name | `terraform.tfstate` |
 
+### Network Configuration
+| Secret Name | Description | Required |
+|-------------|-------------|----------|
+| `VNET_ADDRESS_SPACE` | Virtual network address space (CIDR) | ❌ (default: 10.0.0.0/16) |
+
 ### Application Configuration
 | Secret Name | Description | Required |
 |-------------|-------------|----------|

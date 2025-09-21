@@ -270,6 +270,7 @@ set_github_secrets() {
         "TF_STATE_STORAGE_ACCOUNT_NAME"
         "TF_STATE_CONTAINER_NAME"
         "TF_STATE_KEY"
+        "VNET_ADDRESS_SPACE"
         "ADMIN_EMAIL"
         "ADMIN_PASSWORD"
         "JIRA_ADMIN_EMAIL"
@@ -367,6 +368,12 @@ main() {
     prompt_input "Enter the Terraform state container name:" "TF_STATE_CONTAINER_NAME" false "^[a-z0-9-]{3,63}$" "tfstate"
     prompt_input "Enter the Terraform state key (filename):" "TF_STATE_KEY" false ".*\.tfstate$" "terraform.tfstate"
     prompt_input "Enter the resource group name (optional):" "TF_STATE_RESOURCE_GROUP" false "^[a-zA-Z0-9_.-]*$" "secconf-rg"
+    
+    # Step 3.5: Network Configuration
+    echo
+    echo "🌐 Network Configuration"
+    echo "======================="
+    prompt_input "Enter the VNet address space (CIDR notation):" "VNET_ADDRESS_SPACE" false "^([0-9]{1,3}\.){3}[0-9]{1,3}/([0-9]|[1-2][0-9]|3[0-2])$" "10.0.0.0/16"
     
     # Step 4: Collect application configuration
     echo

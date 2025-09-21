@@ -106,6 +106,7 @@ jobs:
         TF_VAR_arm_tenant_id: ${{ secrets.AZURE_TENANT_ID }}
         TF_VAR_arm_subscription_id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
         TF_VAR_arm_client_secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+        TF_VAR_vnet_address_space: ${{ secrets.VNET_ADDRESS_SPACE || '10.0.0.0/16' }}
         TF_VAR_admin_email: ${{ secrets.ADMIN_EMAIL }}
         TF_VAR_admin_password: ${{ secrets.ADMIN_PASSWORD }}
         TF_VAR_jira_admin_email: ${{ secrets.JIRA_ADMIN_EMAIL }}
@@ -283,6 +284,7 @@ jobs:
         TF_VAR_arm_tenant_id: ${{ secrets.AZURE_TENANT_ID }}
         TF_VAR_arm_subscription_id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
         TF_VAR_arm_client_secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+        TF_VAR_vnet_address_space: ${{ secrets.VNET_ADDRESS_SPACE || '10.0.0.0/16' }}
         TF_VAR_admin_email: ${{ secrets.ADMIN_EMAIL }}
         TF_VAR_admin_password: ${{ secrets.ADMIN_PASSWORD }}
         TF_VAR_jira_admin_email: ${{ secrets.JIRA_ADMIN_EMAIL }}

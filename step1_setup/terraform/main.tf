@@ -22,9 +22,10 @@ provider "azurerm" {
 module "azure_tenant" {
   source = "./modules/azure-tenant"
 
-  location         = var.location
-  resource_prefix  = var.resource_prefix
-  admin_email      = var.admin_email
+  location            = var.location
+  resource_prefix     = var.resource_prefix
+  admin_email         = var.admin_email
+  vnet_address_space  = var.vnet_address_space
 }
 
 # MCP Servers

@@ -87,6 +87,7 @@ The setup process uses environment variables defined in a `.env` file. The scrip
 | `JIRA_ADMIN_EMAIL` | Email for Jira demo admin | `admin@example.com` |
 | `CROWDSTRIKE_API_KEY` | CrowdStrike API key for demo | `your-api-key` |
 | `MCP_SERVER_COUNT` | Number of MCP servers to deploy | `2` |
+| `VNET_ADDRESS_SPACE` | Virtual network address space (CIDR) | `10.0.0.0/16` |
 
 ### Optional Variables
 
@@ -97,6 +98,18 @@ The following variables have defaults but can be customized:
 | `LOCATION` | `eastus` | Azure region for resources |
 | `RESOURCE_PREFIX` | `secconf` | Prefix for Azure resource names |
 | `ADMIN_USERNAME` | `azureadmin` | Admin username for VMs |
+
+### Network Address Space
+
+The setup automatically calculates subnet addresses based on your provided VNet address space:
+
+| VNet Address Space | Generated Subnet | Description |
+|-------------------|------------------|-------------|
+| `10.0.0.0/16` | `10.0.1.0/24` | Default configuration |
+| `192.168.0.0/16` | `192.168.1.0/24` | Private network example |
+| `172.16.0.0/12` | `172.16.1.0/20` | Enterprise network example |
+
+The system uses Terraform's `cidrsubnet()` function to automatically create appropriately sized subnets within your specified address space.
 
 ## 🔧 What the Setup Does
 
