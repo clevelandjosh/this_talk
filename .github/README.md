@@ -71,7 +71,40 @@ The workflow uses GitHub Environment protection rules:
 
 ## 🚀 Setup Instructions
 
-### 1. Create Service Principal
+You can set up the GitHub Actions workflow either automatically using our interactive script or manually following the step-by-step instructions below.
+
+### Option A: Automated Setup (Recommended)
+
+Use the interactive setup script that handles all configuration automatically:
+
+```bash
+# Navigate to the .github directory
+cd .github
+
+# Run the interactive setup script
+./setup-github-actions.sh
+```
+
+The script will:
+- ✅ Check all dependencies (Azure CLI, GitHub CLI, jq)
+- ✅ Verify Azure and GitHub authentication
+- ✅ Prompt for all required configuration values
+- ✅ Create Azure Service Principal automatically
+- ✅ Configure storage account permissions
+- ✅ Set all GitHub repository secrets
+- ✅ Provide environment setup instructions
+- ✅ Generate configuration files for reference
+
+**Prerequisites for automated setup:**
+- Azure CLI installed and logged in
+- GitHub CLI installed and logged in
+- jq installed for JSON processing
+
+### Option B: Manual Setup
+
+Follow these step-by-step instructions for manual configuration:
+
+#### 1. Create Service Principal
 
 ```bash
 # Create service principal for GitHub Actions
@@ -82,7 +115,7 @@ az ad sp create-for-rbac \
   --sdk-auth
 ```
 
-### 2. Configure Storage Account Permissions
+#### 2. Configure Storage Account Permissions
 
 ```bash
 # Grant storage permissions to service principal
@@ -92,18 +125,18 @@ az role assignment create \
   --scope "/subscriptions/{subscription-id}/resourceGroups/{rg-name}/providers/Microsoft.Storage/storageAccounts/{storage-account-name}"
 ```
 
-### 3. Add GitHub Secrets
+#### 3. Add GitHub Secrets
 
 Navigate to your repository and add all required secrets:
 - `Settings > Secrets and variables > Actions > New repository secret`
 
-### 4. Configure Environments
+#### 4. Configure Environments
 
 Create protection rules for environments:
 - `Settings > Environments > New environment`
 - Add protection rules as described above
 
-### 5. Enable Workflows
+#### 5. Enable Workflows
 
 Ensure GitHub Actions are enabled:
 - `Settings > Actions > General > Allow all actions and reusable workflows`

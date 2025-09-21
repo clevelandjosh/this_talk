@@ -186,7 +186,21 @@ This repository includes automated Terraform workflows for continuous deployment
 - **Automatic Apply**: Changes merged to main branch are automatically applied
 - **Manual Operations**: Support for manual plan, apply, and destroy operations
 
-See [`.github/README.md`](../.github/README.md) for complete setup instructions including:
+### Quick Setup
+
+Use the automated setup script for easy configuration:
+
+```bash
+# Navigate to the .github directory
+cd ../.github
+
+# Run the interactive setup script
+./setup-github-actions.sh
+```
+
+### Manual Setup
+
+See [`.github/README.md`](../.github/README.md) for complete manual setup instructions including:
 - Required GitHub secrets configuration
 - Service principal setup
 - Environment protection rules
