@@ -1,11 +1,11 @@
 # Step 1: Environment Setup
 
-This directory contains the setup scripts and Terraform configurations for the ISS talk presentation demo environment. The setup process creates Azure infrastructure including networking, monitoring, and demo applications for Jira and CrowdStrike integrations.
+This directory contains the setup scripts and Terraform configurations for the demo environment. The setup process creates Azure infrastructure including networking, monitoring, and Jira and CrowdStrike integrations. The services we use to as examples are deployed in step 4, so if you want to roll your own services instead you won't have a cluttered workspace. 
 
 ## 🎯 Overview
 
 The setup creates:
-- Azure Resource Group with VNet and subnets
+- Azure Resource Group with hub-and-spoke network topology
 - Log Analytics workspace for monitoring
 - Storage account for Terraform state management
 - Service principal for Terraform authentication
@@ -66,10 +66,12 @@ step1_setup/
     ├── main.tf                 # Main Terraform configuration
     ├── variables.tf            # Terraform variables
     └── modules/
-        └── azure-tenant/       # Azure tenant module
-            ├── main.tf
-            ├── outputs.tf
-            └── variables.tf
+        ├── azure-tenant/       # Azure tenant module
+        │   ├── main.tf
+        │   ├── outputs.tf
+        │   └── variables.tf
+        └── networking/         # Hub-and-spoke networking module
+            └── locals.tf
 ```
 
 ## ⚙️ Configuration
@@ -87,7 +89,7 @@ The setup process uses environment variables defined in a `.env` file. The scrip
 | `JIRA_ADMIN_EMAIL` | Email for Jira demo admin | `admin@example.com` |
 | `CROWDSTRIKE_API_KEY` | CrowdStrike API key for demo | `your-api-key` |
 | `MCP_SERVER_COUNT` | Number of MCP servers to deploy | `2` |
-| `VNET_ADDRESS_SPACE` | Virtual network address space (CIDR) | `10.0.0.0/16` |
+| `VNET_ADDRESS_SPACE` | Virtual network address space (CIDR) | `10.209.96.0/19` |
 
 ### Optional Variables
 
@@ -99,17 +101,54 @@ The following variables have defaults but can be customized:
 | `RESOURCE_PREFIX` | `secconf` | Prefix for Azure resource names |
 | `ADMIN_USERNAME` | `azureadmin` | Admin username for VMs |
 
-### Network Address Space
+### Hub-and-Spoke Network Architecture
 
-The setup automatically calculates subnet addresses based on your provided VNet address space:
+The networking configuration implements a sophisticated hub-and-spoke topology optimized for the default address space `10.209.96.0/19` (8,192 IPs). This design provides excellent scalability and security segmentation:
 
-| VNet Address Space | Generated Subnet | Description |
-|-------------------|------------------|-------------|
-| `10.0.0.0/16` | `10.0.1.0/24` | Default configuration |
-| `192.168.0.0/16` | `192.168.1.0/24` | Private network example |
-| `172.16.0.0/12` | `172.16.1.0/20` | Enterprise network example |
+#### Network Topology Overview
 
-The system uses Terraform's `cidrsubnet()` function to automatically create appropriately sized subnets within your specified address space.
+| Component | Address Space | IP Count | Purpose |
+|-----------|---------------|----------|---------|
+| **Total Network** | `10.209.96.0/19` | 8,192 | Complete address space |
+| **Hub VNet** | `10.209.96.0/22` | 1,024 | Central connectivity hub |
+| **MCP Spoke** | `10.209.100.0/23` | 512 | Model Context Protocol servers |
+| **AKS Spoke** | `10.209.104.0/22` | 1,024 | Azure Kubernetes Service |
+| **VM Spoke** | `10.209.108.0/23` | 512 | Virtual machine workloads |
+| **AI Spoke** | `10.209.112.0/22` | 1,024 | AI services and compute |
+
+#### Detailed Subnet Allocation
+
+**Hub VNet Subnets** (`10.209.96.0/22`):
+- **Azure Firewall**: `10.209.96.0/26` (64 IPs)
+- **Azure Bastion**: `10.209.96.64/27` (32 IPs)
+- **VPN Gateway**: `10.209.96.96/27` (32 IPs)
+- **Shared Services**: `10.209.97.0/24` (256 IPs)
+
+**MCP Spoke Subnets** (`10.209.100.0/23`):
+- **MCP Servers**: `10.209.100.0/25` (128 IPs)
+- **Load Balancer**: `10.209.100.128/26` (64 IPs)
+
+**AKS Spoke Subnets** (`10.209.104.0/22`):
+- **AKS Nodes**: `10.209.104.0/23` (512 IPs)
+- **AKS Pods**: `10.209.106.0/23` (512 IPs)
+
+**VM Spoke Subnets** (`10.209.108.0/23`):
+- **Application VMs**: `10.209.108.0/25` (128 IPs)
+- **Management VMs**: `10.209.108.128/26` (64 IPs)
+
+**AI Spoke Subnets** (`10.209.112.0/22`):
+- **AI Services**: `10.209.112.0/24` (256 IPs)
+- **AI Compute**: `10.209.113.0/24` (256 IPs)
+
+#### Network Design Benefits
+
+- **Security Segmentation**: Each spoke VNet is isolated with controlled communication through the hub
+- **Scalability**: Room for growth within each segment while maintaining organization
+- **Centralized Management**: Hub contains shared services like firewall, bastion, and VPN gateway
+- **Optimized for Azure**: Subnet sizes align with Azure service requirements (AKS, Firewall, etc.)
+- **Future-Proof**: Reserved address space allows for additional spokes and subnets
+
+The system automatically calculates all subnet addresses using Terraform's CIDR functions, ensuring proper allocation and no overlapping ranges.
 
 ## 🔧 What the Setup Does
 
@@ -129,14 +168,14 @@ Verifies that required tools (`terraform`, `az`, `jq`) are installed.
 ### 4. Infrastructure Deployment
 The Terraform configuration creates:
 - **Resource Group**: Container for all resources
-- **Virtual Network**: Network infrastructure with subnets
+- **Hub-and-Spoke Network**: Multi-VNet architecture with proper segmentation
 - **Log Analytics Workspace**: For monitoring and logging
 - **MCP Servers**: Model Context Protocol servers for AI integrations
 - **Demo Applications**: Jira and CrowdStrike integration demos
 
 ## 🔍 Validation
 
-After setup completes, the script automatically validates that all required environment variables are properly set using `validate_env.sh`.
+After setup completes, the script automatically validates that all required environment variables are properly set using [`validate_env.sh`](step1_setup/validate_env.sh).
 
 ## 🛠️ Manual Steps (if needed)
 
@@ -170,6 +209,7 @@ To clean up resources created by this setup, see the `step5_teardown` directory 
 - The `.env` file contains sensitive information - ensure it's not committed to version control
 - Storage account uses `Standard_LRS` replication and blocks public blob access
 - Service principal has minimal required permissions (Storage Blob Data Contributor)
+- Hub-and-spoke network design provides security segmentation between workloads
 
 ## 🐛 Troubleshooting
 
@@ -183,6 +223,8 @@ To clean up resources created by this setup, see the `step5_teardown` directory 
 
 **Permission errors**: Ensure your Azure account has sufficient permissions to create resources and service principals.
 
+**Network addressing conflicts**: The default address space is optimized for `10.209.96.0/19`. If you need different addressing, review the [`networking/locals.tf`](step1_setup/terraform/modules/networking/locals.tf) file.
+
 ### Getting Help
 
 If you encounter issues:
@@ -190,6 +232,7 @@ If you encounter issues:
 2. Verify your Azure credentials and permissions
 3. Ensure all dependencies are properly installed
 4. Review the generated `.env` file for correctness
+5. Check network address space conflicts if using custom addressing
 
 ## 🤖 GitHub Actions CI/CD
 

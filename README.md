@@ -63,4 +63,4 @@ This demo creates real Azure resources and uses actual security tools. Make sure
 
 ## 📞 Support
 
-If you have the required access listed above, this repository contains everything needed to demonstrate AI-powered security automation to your leadership team. 
+If you have the required access listed above, this repository contains everything needed to demonstrate AI-powered security automation to your leadership team. If something that is supposed to be working is not, let me know. Ideally let me know with a fix/pull request, but otherwise a PR will do.

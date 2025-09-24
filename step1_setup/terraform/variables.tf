@@ -11,14 +11,14 @@ variable "resource_prefix" {
   default = "secconf"
 }
 
+# Networking Configuration
 variable "vnet_address_space" {
-  description = "Address space for the virtual network (CIDR notation)"
+  description = "The address space for the entire hub and spoke network"
   type        = string
-  default     = "10.0.0.0/16"
-  
+  default     = "10.209.96.0/19"
   validation {
     condition     = can(cidrhost(var.vnet_address_space, 0))
-    error_message = "The vnet_address_space must be a valid CIDR block (e.g., 10.0.0.0/16)."
+    error_message = "VNet address space must be a valid CIDR block."
   }
 }
 
