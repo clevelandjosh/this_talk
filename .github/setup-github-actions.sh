@@ -13,8 +13,13 @@ NC='\033[0m' # No Color
 # Configuration
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
-SECRETS_FILE="$SCRIPT_DIR/github-secrets.env"
-SP_FILE="$SCRIPT_DIR/service-principals.json"
+SECRETS_DIR="$HOME/.config/azure-setup"  # Store outside repo
+SECRETS_FILE="$SECRETS_DIR/github-secrets.env"
+SP_FILE="$SECRETS_DIR/service-principals.json"
+
+# Create secrets directory with restricted permissions
+mkdir -p "$SECRETS_DIR"
+chmod 700 "$SECRETS_DIR"
 
 # Logging functions
 log_info() {
@@ -43,28 +48,68 @@ error_exit() {
     exit 1
 }
 
+# Detect OS and set package manager
+detect_os_and_pkg_manager() {
+    OS_TYPE=""
+    PKG_MANAGER=""
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        OS_TYPE="macos"
+        PKG_MANAGER="brew install"
+    elif [[ "$OSTYPE" == "linux-gnu"* ]]; then
+        OS_TYPE="linux"
+        # Detect Linux distribution
+        if [ -f /etc/os-release ]; then
+            . /etc/os-release
+            case "$ID" in
+                ubuntu|debian)
+                    PKG_MANAGER="sudo apt-get install -y"
+                    ;;
+                fedora)
+                    PKG_MANAGER="sudo dnf install -y"
+                    ;;
+                centos|rhel)
+                    PKG_MANAGER="sudo yum install -y"
+                    ;;
+                arch)
+                    PKG_MANAGER="sudo pacman -S"
+                    ;;
+                *)
+                    PKG_MANAGER="sudo apt-get install -y"
+                    ;;
+            esac
+        else
+            PKG_MANAGER="sudo apt-get install -y"
+        fi
+    else
+        OS_TYPE="unknown"
+        PKG_MANAGER="(please install manually)"
+    fi
+}
+
 # Dependency checks
 check_dependencies() {
     log_info "Checking dependencies..."
-    
+
+    detect_os_and_pkg_manager
+
     local missing_deps=()
-    
+
     for cmd in az gh jq; do
         if ! command -v "$cmd" &> /dev/null; then
             missing_deps+=("$cmd")
         fi
     done
-    
+
     if [ ${#missing_deps[@]} -ne 0 ]; then
         log_error "Missing dependencies: ${missing_deps[*]}"
         echo
-        echo "Please install the missing dependencies:"
-        echo "  Azure CLI:   brew install azure-cli"
-        echo "  GitHub CLI:  brew install gh"
-        echo "  jq:          brew install jq"
+        echo "Please install the missing dependencies using:"
+        for dep in "${missing_deps[@]}"; do
+            echo "  $PKG_MANAGER $dep"
+        done
         exit 1
     fi
-    
+
     log_success "All dependencies are installed"
 }
 
@@ -74,22 +119,42 @@ prompt_input() {
     local var_name="$2"
     local is_secret="${3:-false}"
     local validation_pattern="${4:-.*}"
-    local example="${5:-}"
+    local default_value="${5:-}"
     
     while true; do
         echo
         echo -e "${BLUE}$prompt${NC}"
-        if [ -n "$example" ]; then
-            echo -e "${YELLOW}Example: $example${NC}"
+        if [ -n "$default_value" ]; then
+            echo -e "${YELLOW}Default: $default_value${NC}"
+            if [ "$is_secret" = "true" ]; then
+                echo -n "Enter value (hidden) [press Enter for default]: "
+            else
+                echo -n "Enter value [press Enter for default]: "
+            fi
+        else
+            if [ "$is_secret" = "true" ]; then
+                echo -n "Enter value (hidden): "
+            else
+                echo -n "Enter value: "
+            fi
         fi
         
+        local input
         if [ "$is_secret" = "true" ]; then
-            echo -n "Enter value (hidden): "
             read -rs input
-            echo
+            echo  # Add newline after hidden input
         else
-            echo -n "Enter value: "
             read -r input
+        fi
+        
+        # Use default value if input is empty and default exists
+        if [[ -z "$input" && -n "$default_value" ]]; then
+            input="$default_value"
+            if [ "$is_secret" = "false" ]; then
+                echo -e "${GREEN}Using default: $default_value${NC}"
+            else
+                echo -e "${GREEN}Using default value${NC}"
+            fi
         fi
         
         if [[ -z "$input" ]]; then
@@ -125,29 +190,52 @@ confirm() {
 check_azure_auth() {
     log_info "Checking Azure CLI authentication..."
     
+    # First check if already logged in
     if ! az account show &> /dev/null; then
         log_warning "Not logged into Azure CLI"
         if confirm "Would you like to login to Azure now?"; then
-            az login || error_exit "Azure login failed"
-            log_success "Azure login successful"
+            # Try regular login first
+            if ! az login; then
+                log_warning "Regular login failed. Trying device code login..."
+                if ! az login --use-device-code; then
+                    error_exit "Azure login failed"
+                fi
+            fi
         else
             error_exit "Azure authentication required to continue"
         fi
-    else
-        local account_info=$(az account show)
-        local subscription_name=$(echo "$account_info" | jq -r '.name')
-        local subscription_id=$(echo "$account_info" | jq -r '.id')
-        log_success "Already logged into Azure"
-        log_info "Current subscription: $subscription_name ($subscription_id)"
-        
-        if ! confirm "Use this subscription for the setup?"; then
-            log_info "Please run 'az account set --subscription <subscription-id>' to change subscription"
-            exit 1
-        fi
-        
-        export AZURE_SUBSCRIPTION_ID="$subscription_id"
-        echo "AZURE_SUBSCRIPTION_ID=\"$subscription_id\"" >> "$SECRETS_FILE"
     fi
+
+    # List available subscriptions
+    log_info "Available Azure subscriptions:"
+    az account list --output table || error_exit "Failed to list subscriptions"
+    
+    # Get subscription count and details
+    local subscriptions
+    subscriptions=$(az account list --query "[].{id:id,name:name}" -o json)
+    local sub_count
+    sub_count=$(echo "$subscriptions" | jq length)
+    
+    if [ "$sub_count" -eq 1 ]; then
+        # If only one subscription exists, use it automatically
+        export AZURE_SUBSCRIPTION_ID=$(echo "$subscriptions" | jq -r '.[0].id')
+        local subscription_name=$(echo "$subscriptions" | jq -r '.[0].name')
+        log_info "Single subscription found - using it automatically"
+    else
+        # Multiple subscriptions - prompt for selection
+        echo
+        prompt_input "Enter the subscription ID to use:" "AZURE_SUBSCRIPTION_ID" false "^[0-9a-f]{8}-([0-9a-f]{4}-){3}[0-9a-f]{12}$" "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+    fi
+    
+    # Set the subscription
+    if ! az account set --subscription "$AZURE_SUBSCRIPTION_ID"; then
+        error_exit "Failed to set subscription. Please verify the subscription ID is correct."
+    fi
+    
+    # Verify subscription
+    local account_info=$(az account show)
+    local subscription_name=$(echo "$account_info" | jq -r '.name')
+    log_success "Using subscription: $subscription_name ($AZURE_SUBSCRIPTION_ID)"
 }
 
 # Check GitHub authentication
@@ -290,16 +378,19 @@ EOF
     log_success "Custom roles created successfully"
 }
 
+
+
 # Create service principal with specific role
 create_service_principal() {
     local sp_name="$1"
     local role_name="$2"
     local description="$3"
-    local subscription_id="${AZURE_SUBSCRIPTION_ID}"
+    local scope="${4:-/subscriptions/${AZURE_SUBSCRIPTION_ID}}"  # Default to subscription scope
     
     log_info "Creating service principal: $sp_name"
     log_info "Role: $role_name"
     log_info "Description: $description"
+    log_info "Scope: $scope"
     
     if ! confirm "Create this service principal?"; then
         log_warning "Skipping service principal: $sp_name"
@@ -310,7 +401,7 @@ create_service_principal() {
     sp_output=$(az ad sp create-for-rbac \
         --name "$sp_name" \
         --role "$role_name" \
-        --scopes "/subscriptions/$subscription_id" \
+        --scopes "$scope" \
         --sdk-auth 2>/dev/null) || error_exit "Failed to create service principal: $sp_name"
     
     # Extract credentials
@@ -399,40 +490,46 @@ create_all_service_principals() {
         echo "AI_CLIENT_SECRET=\"$AI_CLIENT_SECRET\"" >> "$SECRETS_FILE"
     fi
     
-    # 4. AKS Manager - Azure Kubernetes Service Contributor + Network Contributor
+    # 4. AKS Manager - Azure Kubernetes Service Contributor (scoped to AKS RG)
     log_info "4/6 Creating AKS Manager..."
+    ensure_resource_group "$AKS_RESOURCE_GROUP"
     local aks_sp=$(create_service_principal \
         "$project_prefix-aks-manager-$timestamp" \
         "Azure Kubernetes Service Contributor" \
-        "Manages AKS clusters, node pools, and Kubernetes workloads")
+        "Manages AKS clusters, node pools, and Kubernetes workloads" \
+        "/subscriptions/${AZURE_SUBSCRIPTION_ID}/resourceGroups/${AKS_RESOURCE_GROUP}")
     
     if [ -n "$aks_sp" ]; then
-        # Add Network Contributor role for AKS networking
+        # Add Network Contributor role for AKS networking (scoped to AKS RG)
         local aks_client_id=$(echo "$aks_sp" | jq -r '.clientId')
         az role assignment create \
             --assignee "$aks_client_id" \
             --role "Network Contributor" \
-            --scope "/subscriptions/${AZURE_SUBSCRIPTION_ID}" \
+            --scope "/subscriptions/${AZURE_SUBSCRIPTION_ID}/resourceGroups/${AKS_RESOURCE_GROUP}" \
             || log_warning "Failed to assign Network Contributor role to AKS SP"
         
-        export AKS_CLIENT_ID="$AKS_CLIENT_ID"
+        export AKS_CLIENT_ID="$aks_client_id"
         export AKS_CLIENT_SECRET=$(echo "$aks_sp" | jq -r '.clientSecret')
         echo "AKS_CLIENT_ID=\"$AKS_CLIENT_ID\"" >> "$SECRETS_FILE"
         echo "AKS_CLIENT_SECRET=\"$AKS_CLIENT_SECRET\"" >> "$SECRETS_FILE"
+        echo "AKS_RESOURCE_GROUP=\"$AKS_RESOURCE_GROUP\"" >> "$SECRETS_FILE"
     fi
     
-    # 5. VM Image Builder - Custom VM Role
+    # 5. VM Image Builder - Custom VM Role (scoped to VM RG)
     log_info "5/6 Creating VM Image Builder..."
+    ensure_resource_group "$VM_RESOURCE_GROUP"
     local vm_sp=$(create_service_principal \
         "$project_prefix-vm-builder-$timestamp" \
         "VM Image Builder Contributor" \
-        "Manages virtual machines, VM images, disks, and compute resources for image building")
+        "Manages virtual machines, VM images, disks, and compute resources for image building" \
+        "/subscriptions/${AZURE_SUBSCRIPTION_ID}/resourceGroups/${VM_RESOURCE_GROUP}")
     
     if [ -n "$vm_sp" ]; then
         export VM_CLIENT_ID=$(echo "$vm_sp" | jq -r '.clientId')
         export VM_CLIENT_SECRET=$(echo "$vm_sp" | jq -r '.clientSecret')
         echo "VM_CLIENT_ID=\"$VM_CLIENT_ID\"" >> "$SECRETS_FILE"
         echo "VM_CLIENT_SECRET=\"$VM_CLIENT_SECRET\"" >> "$SECRETS_FILE"
+        echo "VM_RESOURCE_GROUP=\"$VM_RESOURCE_GROUP\"" >> "$SECRETS_FILE"
     fi
     
     # 6. Resource Group Manager - Contributor (at subscription level for RG management)
@@ -454,7 +551,22 @@ create_all_service_principals() {
     echo "AZURE_TENANT_ID=\"$AZURE_TENANT_ID\"" >> "$SECRETS_FILE"
     
     log_success "All service principals created successfully"
-    log_info "Service principal details saved to: $SP_FILE"
+    log_warning "Sensitive files are stored in: $SECRETS_DIR"
+    log_warning "Keep these files secure and DO NOT commit them to git!"
+}
+
+# Ensure resource group exists
+ensure_resource_group() {
+    local rg_name="$1"
+    local location="${LOCATION:-eastus}"
+    
+    if ! az group show --name "$rg_name" &>/dev/null; then
+        log_info "Creating resource group: $rg_name"
+        az group create --name "$rg_name" --location "$location" || \
+            error_exit "Failed to create resource group: $rg_name"
+    else
+        log_info "Resource group already exists: $rg_name"
+    fi
 }
 
 # Configure storage account permissions
@@ -528,8 +640,8 @@ set_github_secrets() {
         "TF_STATE_CONTAINER_NAME"
         "TF_STATE_KEY"
         "VNET_ADDRESS_SPACE"
-        "ADMIN_EMAIL"
-        "ADMIN_PASSWORD"
+        "VM_RESOURCE_GROUP"
+        "AKS_RESOURCE_GROUP"
         "JIRA_ADMIN_EMAIL"
         "CROWDSTRIKE_API_KEY"
     )
@@ -631,6 +743,10 @@ display_sp_summary() {
     echo "✅ Each service principal follows the principle of least privilege"
     echo "✅ Custom roles created for specialized functions"
     echo "✅ No service principal has more access than required"
+    echo "⚠️  Important Notes:"
+    echo "  - Azure administrator credentials are stored locally in $SECRETS_DIR"
+    echo "  - These credentials are NOT stored in GitHub secrets"
+    echo "  - Use these credentials only for initial setup and secure maintenance"
 }
 
 # Main setup flow
@@ -669,7 +785,7 @@ main() {
     prompt_input "Enter the Terraform state storage account name:" "TF_STATE_STORAGE_ACCOUNT_NAME" false "^[a-z0-9]{3,24}$" "secconftfstate"
     prompt_input "Enter the Terraform state container name:" "TF_STATE_CONTAINER_NAME" false "^[a-z0-9-]{3,63}$" "tfstate"
     prompt_input "Enter the Terraform state key (filename):" "TF_STATE_KEY" false ".*\.tfstate$" "terraform.tfstate"
-    prompt_input "Enter the resource group name (optional):" "TF_STATE_RESOURCE_GROUP" false "^[a-zA-Z0-9_.-]*$" "secconf-rg"
+    prompt_input "Enter the resource group name:" "TF_STATE_RESOURCE_GROUP" false "^[a-zA-Z0-9_.-]*$" "secconf-rg"
     
     # Step 3.5: Network Configuration
     echo
@@ -679,12 +795,14 @@ main() {
     
     # Step 4: Collect application configuration
     echo
-    echo "🔧 Application Configuration"
-    echo "============================"
-    prompt_input "Enter administrator email address:" "ADMIN_EMAIL" false "^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$" "admin@example.com"
-    prompt_input "Enter administrator password:" "ADMIN_PASSWORD" true "^.{8,}$"
-    prompt_input "Enter Jira admin email address:" "JIRA_ADMIN_EMAIL" false "^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$" "jira-admin@example.com"
-    prompt_input "Enter CrowdStrike API key:" "CROWDSTRIKE_API_KEY" true "^[a-zA-Z0-9_-]+$"
+    echo "🔧 Initial Azure Administrator Configuration"
+    echo "=========================================="
+    echo "Note: These credentials are used ONLY for initial setup to create less privileged service principals."
+    echo "WARNING: These credentials require Contributor rights and should NOT be stored in GitHub secrets."
+    echo "They will be stored locally in $SECRETS_DIR for reference."
+    echo
+    prompt_input "Enter Azure administrator email address:" "AZURE_ADMINISTRATOR" false "^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$" "admin@example.com"
+    prompt_input "Enter Azure administrator password:" "AZURE_ADMINISTRATOR_PASSWORD" true "^.{8,}$"
     
     # Optional configuration
     echo
@@ -776,5 +894,11 @@ main() {
 
 # Script execution
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    if git rev-parse --git-dir > /dev/null 2>&1; then
+        if [[ "$(git rev-parse --show-toplevel)" == *"$SECRETS_DIR"* ]]; then
+            error_exit "Cannot store secrets in git-tracked directory!"
+        fi
+    fi
+    
     main "$@"
 fi
