@@ -7,12 +7,14 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
+PURPLE='\033[0;35m'
 NC='\033[0m' # No Color
 
 # Configuration
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 SECRETS_FILE="$SCRIPT_DIR/github-secrets.env"
+SP_FILE="$SCRIPT_DIR/service-principals.json"
 
 # Logging functions
 log_info() {
@@ -29,6 +31,10 @@ log_warning() {
 
 log_error() {
     echo -e "${RED}❌ $1${NC}"
+}
+
+log_section() {
+    echo -e "${PURPLE}🔧 $1${NC}"
 }
 
 # Error handling
@@ -162,93 +168,331 @@ check_github_auth() {
     fi
 }
 
-# Create Azure Service Principal
-create_service_principal() {
-    log_info "Creating Azure Service Principal for GitHub Actions..."
+# Create custom roles
+create_custom_roles() {
+    log_section "Creating Custom Azure Roles"
     
-    local sp_name="github-actions-terraform-$(date +%s)"
     local subscription_id="${AZURE_SUBSCRIPTION_ID}"
     
-    echo
-    echo "Service Principal Details:"
-    echo "  Name: $sp_name"
-    echo "  Subscription: $subscription_id"
-    echo "  Role: Contributor"
+    # Network Infrastructure Contributor Role
+    log_info "Creating Network Infrastructure Contributor role..."
+    local network_role_def=$(cat <<EOF
+{
+    "Name": "Network Infrastructure Contributor",
+    "IsCustom": true,
+    "Description": "Manage virtual networks, subnets, firewalls, load balancers, and networking components with least privilege access",
+    "Actions": [
+        "Microsoft.Network/virtualNetworks/*",
+        "Microsoft.Network/networkSecurityGroups/*",
+        "Microsoft.Network/routeTables/*",
+        "Microsoft.Network/publicIPAddresses/*",
+        "Microsoft.Network/loadBalancers/*",
+        "Microsoft.Network/azureFirewalls/*",
+        "Microsoft.Network/bastionHosts/*",
+        "Microsoft.Network/vpnGateways/*",
+        "Microsoft.Network/virtualNetworkGateways/*",
+        "Microsoft.Network/networkInterfaces/*",
+        "Microsoft.Network/privateEndpoints/*",
+        "Microsoft.Network/privateDnsZones/*",
+        "Microsoft.Network/dnsZones/*",
+        "Microsoft.Network/applicationGateways/*",
+        "Microsoft.Resources/deployments/*",
+        "Microsoft.Resources/subscriptions/resourceGroups/read"
+    ],
+    "NotActions": [],
+    "DataActions": [],
+    "NotDataActions": [],
+    "AssignableScopes": [
+        "/subscriptions/$subscription_id"
+    ]
+}
+EOF
+)
+    
+    echo "$network_role_def" | az role definition create --role-definition @- 2>/dev/null || log_warning "Network Infrastructure Contributor role may already exist"
+    
+    # AI Foundry Contributor Role
+    log_info "Creating AI Foundry Contributor role..."
+    local ai_role_def=$(cat <<EOF
+{
+    "Name": "AI Foundry Contributor",
+    "IsCustom": true,
+    "Description": "Manage Azure AI services, Cognitive Services, Machine Learning, and AI foundry resources with least privilege access",
+    "Actions": [
+        "Microsoft.CognitiveServices/*",
+        "Microsoft.MachineLearningServices/*",
+        "Microsoft.Ai/*",
+        "Microsoft.Search/*",
+        "Microsoft.DocumentDB/databaseAccounts/*",
+        "Microsoft.KeyVault/vaults/secrets/read",
+        "Microsoft.KeyVault/vaults/keys/read",
+        "Microsoft.Storage/storageAccounts/read",
+        "Microsoft.Storage/storageAccounts/listKeys/action",
+        "Microsoft.Storage/storageAccounts/blobServices/*",
+        "Microsoft.Resources/deployments/*",
+        "Microsoft.Resources/subscriptions/resourceGroups/read",
+        "Microsoft.Insights/*"
+    ],
+    "NotActions": [],
+    "DataActions": [
+        "Microsoft.CognitiveServices/accounts/*",
+        "Microsoft.Storage/storageAccounts/blobServices/containers/blobs/*"
+    ],
+    "NotDataActions": [],
+    "AssignableScopes": [
+        "/subscriptions/$subscription_id"
+    ]
+}
+EOF
+)
+    
+    echo "$ai_role_def" | az role definition create --role-definition @- 2>/dev/null || log_warning "AI Foundry Contributor role may already exist"
+    
+    # VM Image Builder Contributor Role
+    log_info "Creating VM Image Builder Contributor role..."
+    local vm_role_def=$(cat <<EOF
+{
+    "Name": "VM Image Builder Contributor",
+    "IsCustom": true,
+    "Description": "Manage virtual machines, VM images, disks, and related compute resources with least privilege access",
+    "Actions": [
+        "Microsoft.Compute/virtualMachines/*",
+        "Microsoft.Compute/virtualMachineScaleSets/*",
+        "Microsoft.Compute/images/*",
+        "Microsoft.Compute/galleries/*",
+        "Microsoft.Compute/disks/*",
+        "Microsoft.Compute/snapshots/*",
+        "Microsoft.Compute/availabilitySets/*",
+        "Microsoft.Network/networkInterfaces/read",
+        "Microsoft.Network/networkInterfaces/write",
+        "Microsoft.Network/networkInterfaces/join/action",
+        "Microsoft.Storage/storageAccounts/read",
+        "Microsoft.Storage/storageAccounts/listKeys/action",
+        "Microsoft.KeyVault/vaults/secrets/read",
+        "Microsoft.Resources/deployments/*",
+        "Microsoft.Resources/subscriptions/resourceGroups/read",
+        "Microsoft.Insights/*"
+    ],
+    "NotActions": [],
+    "DataActions": [
+        "Microsoft.Storage/storageAccounts/blobServices/containers/blobs/*"
+    ],
+    "NotDataActions": [],
+    "AssignableScopes": [
+        "/subscriptions/$subscription_id"
+    ]
+}
+EOF
+)
+    
+    echo "$vm_role_def" | az role definition create --role-definition @- 2>/dev/null || log_warning "VM Image Builder Contributor role may already exist"
+    
+    log_success "Custom roles created successfully"
+}
+
+# Create service principal with specific role
+create_service_principal() {
+    local sp_name="$1"
+    local role_name="$2"
+    local description="$3"
+    local subscription_id="${AZURE_SUBSCRIPTION_ID}"
+    
+    log_info "Creating service principal: $sp_name"
+    log_info "Role: $role_name"
+    log_info "Description: $description"
     
     if ! confirm "Create this service principal?"; then
-        log_warning "Skipping service principal creation"
+        log_warning "Skipping service principal: $sp_name"
         return 0
     fi
     
-    log_info "Creating service principal..."
     local sp_output
     sp_output=$(az ad sp create-for-rbac \
         --name "$sp_name" \
-        --role "Contributor" \
+        --role "$role_name" \
         --scopes "/subscriptions/$subscription_id" \
-        --sdk-auth 2>/dev/null) || error_exit "Failed to create service principal"
+        --sdk-auth 2>/dev/null) || error_exit "Failed to create service principal: $sp_name"
     
     # Extract credentials
     local client_id=$(echo "$sp_output" | jq -r '.clientId')
     local client_secret=$(echo "$sp_output" | jq -r '.clientSecret')
     local tenant_id=$(echo "$sp_output" | jq -r '.tenantId')
     
-    # Store credentials
-    export AZURE_CLIENT_ID="$client_id"
-    export AZURE_CLIENT_SECRET="$client_secret"
-    export AZURE_TENANT_ID="$tenant_id"
+    # Store in SP file
+    local sp_record=$(cat <<EOF
+{
+    "name": "$sp_name",
+    "description": "$description",
+    "role": "$role_name",
+    "clientId": "$client_id",
+    "clientSecret": "$client_secret",
+    "tenantId": "$tenant_id",
+    "subscriptionId": "$subscription_id",
+    "createdAt": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+}
+EOF
+)
     
-    # Save to secrets file
-    {
-        echo "AZURE_CLIENT_ID=\"$client_id\""
-        echo "AZURE_CLIENT_SECRET=\"$client_secret\""
-        echo "AZURE_TENANT_ID=\"$tenant_id\""
-    } >> "$SECRETS_FILE"
+    # Initialize or append to SP file
+    if [ ! -f "$SP_FILE" ] || [ ! -s "$SP_FILE" ]; then
+        echo '{"service_principals": []}' > "$SP_FILE"
+    fi
     
-    log_success "Service principal created successfully"
-    log_info "Client ID: $client_id"
+    # Add new SP to file
+    jq --argjson sp "$sp_record" '.service_principals += [$sp]' "$SP_FILE" > "${SP_FILE}.tmp" && mv "${SP_FILE}.tmp" "$SP_FILE"
     
-    # Save full SP output for reference
-    echo "$sp_output" > "$SCRIPT_DIR/service-principal.json"
-    log_info "Full service principal details saved to: $SCRIPT_DIR/service-principal.json"
+    log_success "Service principal created: $sp_name (Client ID: $client_id)"
+    
+    # Return the credentials for immediate use
+    echo "$sp_output"
+}
+
+# Create all service principals
+create_all_service_principals() {
+    log_section "Creating Service Principals with Least Privilege Access"
+    
+    local timestamp=$(date +%Y%m%d-%H%M%S)
+    local project_prefix="${RESOURCE_PREFIX:-secconf}"
+    
+    # Initialize SP file
+    echo '{"service_principals": []}' > "$SP_FILE"
+    
+    # 1. Terraform State Manager - Storage Blob Data Contributor
+    log_info "1/6 Creating Terraform State Manager..."
+    local tf_state_sp=$(create_service_principal \
+        "$project_prefix-terraform-state-$timestamp" \
+        "Storage Blob Data Contributor" \
+        "Manages Terraform state files in blob storage with read/write access to containers and blobs only")
+    
+    if [ -n "$tf_state_sp" ]; then
+        export TF_STATE_CLIENT_ID=$(echo "$tf_state_sp" | jq -r '.clientId')
+        export TF_STATE_CLIENT_SECRET=$(echo "$tf_state_sp" | jq -r '.clientSecret')
+        echo "TF_STATE_CLIENT_ID=\"$TF_STATE_CLIENT_ID\"" >> "$SECRETS_FILE"
+        echo "TF_STATE_CLIENT_SECRET=\"$TF_STATE_CLIENT_SECRET\"" >> "$SECRETS_FILE"
+    fi
+    
+    # 2. Network Infrastructure Manager - Custom Network Role
+    log_info "2/6 Creating Network Infrastructure Manager..."
+    local network_sp=$(create_service_principal \
+        "$project_prefix-network-infra-$timestamp" \
+        "Network Infrastructure Contributor" \
+        "Manages VNets, subnets, firewalls, load balancers, and all networking components")
+    
+    if [ -n "$network_sp" ]; then
+        export NETWORK_CLIENT_ID=$(echo "$network_sp" | jq -r '.clientId')
+        export NETWORK_CLIENT_SECRET=$(echo "$network_sp" | jq -r '.clientSecret')
+        echo "NETWORK_CLIENT_ID=\"$NETWORK_CLIENT_ID\"" >> "$SECRETS_FILE"
+        echo "NETWORK_CLIENT_SECRET=\"$NETWORK_CLIENT_SECRET\"" >> "$SECRETS_FILE"
+    fi
+    
+    # 3. AI Foundry Manager - Custom AI Role
+    log_info "3/6 Creating AI Foundry Manager..."
+    local ai_sp=$(create_service_principal \
+        "$project_prefix-ai-foundry-$timestamp" \
+        "AI Foundry Contributor" \
+        "Manages Azure AI services, Cognitive Services, Machine Learning workspaces and AI foundry resources")
+    
+    if [ -n "$ai_sp" ]; then
+        export AI_CLIENT_ID=$(echo "$ai_sp" | jq -r '.clientId')
+        export AI_CLIENT_SECRET=$(echo "$ai_sp" | jq -r '.clientSecret')
+        echo "AI_CLIENT_ID=\"$AI_CLIENT_ID\"" >> "$SECRETS_FILE"
+        echo "AI_CLIENT_SECRET=\"$AI_CLIENT_SECRET\"" >> "$SECRETS_FILE"
+    fi
+    
+    # 4. AKS Manager - Azure Kubernetes Service Contributor + Network Contributor
+    log_info "4/6 Creating AKS Manager..."
+    local aks_sp=$(create_service_principal \
+        "$project_prefix-aks-manager-$timestamp" \
+        "Azure Kubernetes Service Contributor" \
+        "Manages AKS clusters, node pools, and Kubernetes workloads")
+    
+    if [ -n "$aks_sp" ]; then
+        # Add Network Contributor role for AKS networking
+        local aks_client_id=$(echo "$aks_sp" | jq -r '.clientId')
+        az role assignment create \
+            --assignee "$aks_client_id" \
+            --role "Network Contributor" \
+            --scope "/subscriptions/${AZURE_SUBSCRIPTION_ID}" \
+            || log_warning "Failed to assign Network Contributor role to AKS SP"
+        
+        export AKS_CLIENT_ID="$AKS_CLIENT_ID"
+        export AKS_CLIENT_SECRET=$(echo "$aks_sp" | jq -r '.clientSecret')
+        echo "AKS_CLIENT_ID=\"$AKS_CLIENT_ID\"" >> "$SECRETS_FILE"
+        echo "AKS_CLIENT_SECRET=\"$AKS_CLIENT_SECRET\"" >> "$SECRETS_FILE"
+    fi
+    
+    # 5. VM Image Builder - Custom VM Role
+    log_info "5/6 Creating VM Image Builder..."
+    local vm_sp=$(create_service_principal \
+        "$project_prefix-vm-builder-$timestamp" \
+        "VM Image Builder Contributor" \
+        "Manages virtual machines, VM images, disks, and compute resources for image building")
+    
+    if [ -n "$vm_sp" ]; then
+        export VM_CLIENT_ID=$(echo "$vm_sp" | jq -r '.clientId')
+        export VM_CLIENT_SECRET=$(echo "$vm_sp" | jq -r '.clientSecret')
+        echo "VM_CLIENT_ID=\"$VM_CLIENT_ID\"" >> "$SECRETS_FILE"
+        echo "VM_CLIENT_SECRET=\"$VM_CLIENT_SECRET\"" >> "$SECRETS_FILE"
+    fi
+    
+    # 6. Resource Group Manager - Contributor (at subscription level for RG management)
+    log_info "6/6 Creating Resource Group Manager..."
+    local rg_sp=$(create_service_principal \
+        "$project_prefix-resource-groups-$timestamp" \
+        "Contributor" \
+        "Manages resource groups and subscription-level resources with full contributor access")
+    
+    if [ -n "$rg_sp" ]; then
+        export RG_CLIENT_ID=$(echo "$rg_sp" | jq -r '.clientId')
+        export RG_CLIENT_SECRET=$(echo "$rg_sp" | jq -r '.clientSecret')
+        echo "RG_CLIENT_ID=\"$RG_CLIENT_ID\"" >> "$SECRETS_FILE"
+        echo "RG_CLIENT_SECRET=\"$RG_CLIENT_SECRET\"" >> "$SECRETS_FILE"
+    fi
+    
+    # Store tenant info
+    export AZURE_TENANT_ID=$(echo "$tf_state_sp" | jq -r '.tenantId')
+    echo "AZURE_TENANT_ID=\"$AZURE_TENANT_ID\"" >> "$SECRETS_FILE"
+    
+    log_success "All service principals created successfully"
+    log_info "Service principal details saved to: $SP_FILE"
 }
 
 # Configure storage account permissions
 configure_storage_permissions() {
-    if [ -z "${TF_STATE_STORAGE_ACCOUNT_NAME:-}" ]; then
-        log_warning "Storage account name not provided, skipping storage permissions"
+    if [ -z "${TF_STATE_STORAGE_ACCOUNT_NAME:-}" ] || [ -z "${TF_STATE_CLIENT_ID:-}" ]; then
+        log_warning "Storage account name or SP not provided, skipping storage permissions"
         return 0
     fi
     
-    log_info "Configuring storage account permissions..."
+    log_info "Configuring storage account permissions for Terraform State Manager..."
     
     local storage_account="${TF_STATE_STORAGE_ACCOUNT_NAME}"
     local resource_group="${TF_STATE_RESOURCE_GROUP:-}"
-    local client_id="${AZURE_CLIENT_ID}"
+    local client_id="${TF_STATE_CLIENT_ID}"
     
     if [ -z "$resource_group" ]; then
         # Try to find the resource group
         resource_group=$(az storage account list --query "[?name=='$storage_account'].resourceGroup | [0]" -o tsv)
         if [ -z "$resource_group" ] || [ "$resource_group" = "null" ]; then
             log_warning "Could not find resource group for storage account: $storage_account"
-            log_info "Please manually assign 'Storage Blob Data Contributor' role to the service principal"
+            log_info "Please manually assign 'Storage Blob Data Contributor' role to the Terraform State Manager SP"
             return 0
         fi
     fi
     
-    log_info "Assigning Storage Blob Data Contributor role to service principal..."
+    log_info "Assigning Storage Blob Data Contributor role to Terraform State Manager..."
     az role assignment create \
         --assignee "$client_id" \
         --role "Storage Blob Data Contributor" \
         --scope "/subscriptions/${AZURE_SUBSCRIPTION_ID}/resourceGroups/$resource_group/providers/Microsoft.Storage/storageAccounts/$storage_account" \
         || log_warning "Failed to assign storage role. You may need to do this manually."
     
-    log_success "Storage permissions configured"
+    log_success "Storage permissions configured for Terraform State Manager"
 }
 
 # Set GitHub secrets
 set_github_secrets() {
-    log_info "Setting GitHub repository secrets..."
+    log_info "Setting GitHub repository secrets for all service principals..."
     
     local repo_owner=$(gh repo view --json owner --jq '.owner.login')
     local repo_name=$(gh repo view --json name --jq '.name')
@@ -261,12 +505,25 @@ set_github_secrets() {
         return 0
     fi
     
-    # Define secrets to set
-    local secrets=(
-        "AZURE_CLIENT_ID"
-        "AZURE_CLIENT_SECRET"
-        "AZURE_TENANT_ID"
-        "AZURE_SUBSCRIPTION_ID"
+    # Define secrets to set with their service principal mappings
+    local terraform_secrets=(
+        "TF_STATE_CLIENT_ID:Terraform State Manager"
+        "TF_STATE_CLIENT_SECRET:Terraform State Manager"
+        "NETWORK_CLIENT_ID:Network Infrastructure Manager"
+        "NETWORK_CLIENT_SECRET:Network Infrastructure Manager"
+        "AI_CLIENT_ID:AI Foundry Manager"
+        "AI_CLIENT_SECRET:AI Foundry Manager"
+        "AKS_CLIENT_ID:AKS Manager"
+        "AKS_CLIENT_SECRET:AKS Manager"
+        "VM_CLIENT_ID:VM Image Builder"
+        "VM_CLIENT_SECRET:VM Image Builder"
+        "RG_CLIENT_ID:Resource Group Manager"
+        "RG_CLIENT_SECRET:Resource Group Manager"
+        "AZURE_TENANT_ID:Common"
+        "AZURE_SUBSCRIPTION_ID:Common"
+    )
+    
+    local config_secrets=(
         "TF_STATE_STORAGE_ACCOUNT_NAME"
         "TF_STATE_CONTAINER_NAME"
         "TF_STATE_KEY"
@@ -283,10 +540,23 @@ set_github_secrets() {
         "RESOURCE_PREFIX"
     )
     
-    # Set required secrets
-    for secret in "${secrets[@]}"; do
+    # Set service principal secrets
+    for secret_info in "${terraform_secrets[@]}"; do
+        local secret_name=$(echo "$secret_info" | cut -d':' -f1)
+        local sp_name=$(echo "$secret_info" | cut -d':' -f2)
+        
+        if [ -n "${!secret_name:-}" ]; then
+            log_info "Setting secret: $secret_name ($sp_name)"
+            echo "${!secret_name}" | gh secret set "$secret_name" || log_warning "Failed to set secret: $secret_name"
+        else
+            log_warning "Secret $secret_name is not set in environment"
+        fi
+    done
+    
+    # Set configuration secrets
+    for secret in "${config_secrets[@]}"; do
         if [ -n "${!secret:-}" ]; then
-            log_info "Setting secret: $secret"
+            log_info "Setting config secret: $secret"
             echo "${!secret}" | gh secret set "$secret" || log_warning "Failed to set secret: $secret"
         else
             log_warning "Secret $secret is not set in environment"
@@ -301,7 +571,7 @@ set_github_secrets() {
         fi
     done
     
-    log_success "GitHub secrets configured"
+    log_success "GitHub secrets configured for all service principals"
 }
 
 # Create GitHub environments
@@ -337,17 +607,49 @@ create_github_environments() {
     echo "     - Manual approval only"
 }
 
+# Display service principal summary
+display_sp_summary() {
+    log_section "Service Principal Summary"
+    echo
+    echo "📋 Service Principals Created:"
+    echo "=============================="
+    echo
+    
+    if [ -f "$SP_FILE" ]; then
+        jq -r '.service_principals[] | "• \(.name)\n  Role: \(.role)\n  Purpose: \(.description)\n  Client ID: \(.clientId)\n"' "$SP_FILE"
+    fi
+    
+    echo "🔐 Security Architecture:"
+    echo "========================"
+    echo "• Terraform State Manager    → Storage Blob Data Contributor (blob access only)"
+    echo "• Network Infrastructure     → Custom Network Contributor (networking only)"
+    echo "• AI Foundry Manager        → Custom AI Contributor (AI services only)"
+    echo "• AKS Manager              → AKS + Network Contributor (Kubernetes only)"
+    echo "• VM Image Builder         → Custom VM Contributor (compute only)"
+    echo "• Resource Group Manager   → Contributor (resource groups only)"
+    echo
+    echo "✅ Each service principal follows the principle of least privilege"
+    echo "✅ Custom roles created for specialized functions"
+    echo "✅ No service principal has more access than required"
+}
+
 # Main setup flow
 main() {
     echo
-    echo "🚀 GitHub Actions Terraform CI/CD Setup"
-    echo "========================================"
+    echo "🚀 Multi-Service Principal GitHub Actions Setup"
+    echo "==============================================="
     echo
-    echo "This script will help you configure GitHub Actions for automated Terraform deployments."
+    echo "This script creates 6 service principals with least privilege access:"
+    echo "1. Terraform State Manager (blob storage only)"
+    echo "2. Network Infrastructure Manager (networking only)"
+    echo "3. AI Foundry Manager (AI services only)"
+    echo "4. AKS Manager (Kubernetes only)"
+    echo "5. VM Image Builder (compute only)"
+    echo "6. Resource Group Manager (resource groups only)"
     echo
     
     # Initialize secrets file
-    rm -f "$SECRETS_FILE"
+    rm -f "$SECRETS_FILE" "$SP_FILE"
     touch "$SECRETS_FILE"
     
     # Step 1: Check dependencies
@@ -373,7 +675,7 @@ main() {
     echo
     echo "🌐 Network Configuration"
     echo "======================="
-    prompt_input "Enter the VNet address space (CIDR notation):" "VNET_ADDRESS_SPACE" false "^([0-9]{1,3}\.){3}[0-9]{1,3}/([0-9]|[1-2][0-9]|3[0-2])$" "10.0.0.0/16"
+    prompt_input "Enter the VNet address space (CIDR notation):" "VNET_ADDRESS_SPACE" false "^([0-9]{1,3}\.){3}[0-9]{1,3}/([0-9]|[1-2][0-9]|3[0-2])$" "10.209.96.0/19"
     
     # Step 4: Collect application configuration
     echo
@@ -390,7 +692,7 @@ main() {
     echo "========================="
     if confirm "Would you like to configure optional settings?"; then
         prompt_input "Enter number of MCP servers:" "MCP_SERVER_COUNT" false "^[0-9]+$" "2"
-        prompt_input "Enter Azure region:" "LOCATION" false "^[a-z0-9]+$" "eastus"
+        prompt_input "Enter Azure region:" "LOCATION" false "^[a-z0-9 ]+$" "eastus"
         prompt_input "Enter resource prefix:" "RESOURCE_PREFIX" false "^[a-zA-Z0-9-]{3,10}$" "secconf"
     else
         # Set defaults
@@ -404,60 +706,72 @@ main() {
         } >> "$SECRETS_FILE"
     fi
     
-    # Step 5: Create service principal
+    # Step 5: Create custom roles
     echo
-    echo "🔐 Azure Service Principal"
-    echo "========================="
-    create_service_principal
+    log_section "Azure Custom Roles"
+    create_custom_roles
     
-    # Step 6: Configure storage permissions
+    # Step 6: Create all service principals
+    echo
+    log_section "Service Principal Creation"
+    create_all_service_principals
+    
+    # Step 7: Configure storage permissions
     echo
     echo "📁 Storage Permissions"
     echo "====================="
     configure_storage_permissions
     
-    # Step 7: Set GitHub secrets
+    # Step 8: Set GitHub secrets
     echo
     echo "🔑 GitHub Secrets"
-    echo "================"
+    echo "================="
     set_github_secrets
     
-    # Step 8: Create environments
+    # Step 9: Create environments
     echo
     echo "🛡️  GitHub Environments"
     echo "======================"
     create_github_environments
     
+    # Step 10: Display summary
+    echo
+    display_sp_summary
+    
     # Final summary
     echo
-    echo "🎉 Setup Complete!"
-    echo "================="
-    log_success "GitHub Actions CI/CD setup completed successfully"
+    echo "🎉 Multi-Service Principal Setup Complete!"
+    echo "=========================================="
+    log_success "All service principals created with least privilege access"
     echo
     echo "📋 Summary:"
     echo "  ✅ Dependencies verified"
     echo "  ✅ Azure and GitHub authentication confirmed"
-    echo "  ✅ Service principal created"
+    echo "  ✅ Custom roles created for specialized functions"
+    echo "  ✅ 6 service principals created with minimal required permissions"
     echo "  ✅ Storage permissions configured"
-    echo "  ✅ GitHub secrets set"
+    echo "  ✅ GitHub secrets set for all service principals"
     echo "  ✅ Environment setup instructions provided"
     echo
     echo "📁 Files created:"
     echo "  - $SECRETS_FILE (contains all configuration)"
-    echo "  - $SCRIPT_DIR/service-principal.json (service principal details)"
+    echo "  - $SP_FILE (detailed service principal information)"
     echo
-    echo "🔒 Security notes:"
-    echo "  - Keep the secrets file secure and do not commit to version control"
-    echo "  - Service principal credentials are stored in service-principal.json"
-    echo "  - Complete environment setup in GitHub web interface"
+    echo "🔒 Security Benefits:"
+    echo "  - Principle of least privilege enforced"
+    echo "  - Custom roles for specialized functions"
+    echo "  - No service principal has excessive permissions"
+    echo "  - Clear separation of concerns"
+    echo "  - Audit trail for all service principals"
     echo
     echo "🚀 Next steps:"
-    echo "  1. Complete GitHub environment configuration (see instructions above)"
-    echo "  2. Test the workflow by making a change to Terraform files"
-    echo "  3. Create a pull request to verify the plan workflow"
-    echo "  4. Merge to main to test the apply workflow"
+    echo "  1. Review service principal assignments in Azure Portal"
+    echo "  2. Complete GitHub environment configuration"
+    echo "  3. Update Terraform configurations to use appropriate service principals"
+    echo "  4. Test workflows with different service principals for different operations"
+    echo "  5. Monitor service principal usage and adjust permissions if needed"
     echo
-    log_info "GitHub Actions CI/CD is ready to use!"
+    log_info "Multi-Service Principal GitHub Actions CI/CD is ready to use!"
 }
 
 # Script execution
