@@ -1,66 +1,105 @@
-# AI Security Automation Demo
+# Azure Infrastructure Setup Guide
 
-This repository demonstrates how AI agents can automatically find and fix security issues in your cloud infrastructure. It was created for the ISS conference presentation on intelligent security workflows.
+This repository contains scripts and configurations for setting up Azure infrastructure using a two-step process with proper security controls and infrastructure as code.
 
-## 🎯 What This Demo Shows
+## Prerequisites
 
-This project shows how AI can help your security team by:
-- **Finding security problems** in your cloud setup automatically
-- **Creating tickets** in your project management system
-- **Suggesting fixes** for common security issues
-- **Working with your existing tools** like CrowdStrike and Jira
+- Azure CLI installed and updated
+- GitHub CLI installed
+- Terraform CLI installed
+- `jq` command-line tool installed
+- Azure subscription with Contributor access
+- GitHub repository access with admin rights
 
-## 🏗️ What You'll Build
+## Repository Structure
 
-The demo creates a complete security automation system that:
-1. Scans your Azure cloud environment for security issues
-2. Uses AI to understand and prioritize problems
-3. Creates tickets in Jira for your team to track
-4. Integrates with CrowdStrike for threat detection
-5. Provides a dashboard to monitor everything
+```
+.
+├── .github/                    # GitHub Actions workflows and setup
+├── step0_account_and_github_setup/   # Initial Azure and GitHub configuration
+└── step1_setup/               # Infrastructure deployment scripts
+```
 
-## 📋 What You Need Before Starting
+## Setup Process
 
-### Azure Access Requirements
-- **Azure tenant access** - You need to manage an Azure environment
-- **Subscription creation rights** - Ability to create new Azure subscriptions
-- **Service principal permissions** - Rights to create and manage service accounts
+### Step 0: Account and Initial Setup
 
-### Third-Party Tool Access
-- **CrowdStrike demo account** - A test environment for threat detection
-- **Jira demo workspace** - A test project management setup
-- **CrowdStrike CSPM setup rights** - Permission to configure cloud security monitoring
-- **Jira ticket creation rights** - Ability to create and manage tickets
+This step configures Azure authentication, creates service principals, and sets up GitHub secrets.
 
-## 🚀 Getting Started
+```bash
+cd step0_account_and_github_setup
+./setup_step0.sh
+```
 
-This demo is organized into clear steps:
+This script will:
+1. Check dependencies and Azure authentication
+2. Create custom Azure roles
+3. Create service principals with least privilege
+4. Configure GitHub secrets
+5. Set up Terraform backend access
 
-1. **[Setup](step1_setup/)** - Install and configure all the tools
-2. **[Integrations](step2_integrations/)** - Connect your security tools
-3. **[AI Features](step3_ai_functionality/)** - Add intelligent automation
-4. **[Optional Resources](step4_optional_resources/)** - Enhance with extra features
-5. **[Cleanup](step5_teardown/)** - Remove everything when done
+### Step 1: Infrastructure Deployment
 
-Each step includes detailed instructions and automated scripts to make setup easy.
+After Step 0 completes successfully, proceed with infrastructure deployment:
 
-## 🎪 Demo Use Cases
+```bash
+cd ../step1_setup
+./setup.sh
+```
 
-Perfect for showing leadership:
-- How AI can reduce manual security work
-- Real-time threat detection and response
-- Automated compliance monitoring
-- Integration with existing security tools
-- Cost savings from automation
+This script will:
+1. Validate environment
+2. Create backend resources
+3. Initialize Terraform
+4. Deploy infrastructure
 
-## 🔒 Security Note
+## Validation
 
-This demo creates real Azure resources and uses actual security tools. Make sure you:
-- Use a test environment, not production
-- Follow your organization's security policies
-- Clean up resources when finished
-- Keep access credentials secure
+Run tests to verify setup:
 
-## 📞 Support
+```bash
+# Test Step 0 configuration
+cd step0_account_and_github_setup
+./run_tests.sh
 
-If you have the required access listed above, this repository contains everything needed to demonstrate AI-powered security automation to your leadership team. If something that is supposed to be working is not, let me know. Ideally let me know with a fix/pull request, but otherwise a PR will do.
+# Test Step 1 setup
+cd ../step1_setup
+./test_integration.sh
+```
+
+## Directory Documentation
+
+For detailed information about each step, refer to:
+
+1. [Initial Setup Documentation](./step0_account_and_github_setup/README.md)
+2. [Infrastructure Setup Documentation](./step1_setup/README.md)
+3. [GitHub Actions Documentation](./.github/README.md)
+
+## Security Notes
+
+- Administrator credentials are stored locally in `~/.config/azure-setup/`
+- Service principal credentials are stored in GitHub secrets
+- Custom roles enforce least-privilege access
+- Resource groups are scoped to specific workloads
+
+## Troubleshooting
+
+If you encounter issues:
+
+1. Check Azure CLI authentication: `az account show`
+2. Verify GitHub authentication: `gh auth status`
+3. Confirm Terraform initialization: `terraform init`
+4. Review logs in `~/.config/azure-setup/`
+
+## Next Steps
+
+After completing the setup:
+
+1. Review created Azure resources in the portal
+2. Verify GitHub Actions workflows
+3. Test infrastructure access
+4. Configure monitoring and alerts
+
+## Contributing
+
+Please read [CONTRIBUTING.md](./CONTRIBUTING.md) for details on our code of conduct and the process for submitting pull requests.
