@@ -17,12 +17,12 @@ SECRETS_DIR="$HOME/.config/azure-setup"  # Store outside repo
 SECRETS_FILE="$SECRETS_DIR/github-secrets.env"
 SP_FILE="$SECRETS_DIR/service-principals.json"
 
-# Declare variables with defaults
-declare -x RESOURCE_PREFIX=""
-declare -x VM_RESOURCE_GROUP=""
-declare -x AKS_RESOURCE_GROUP=""
-declare -x LOCATION=""
-declare -x AZURE_SUBSCRIPTION_ID=""
+# Initialize variables
+RESOURCE_PREFIX=""
+VM_RESOURCE_GROUP=""
+AKS_RESOURCE_GROUP=""
+LOCATION=""
+AZURE_SUBSCRIPTION_ID=""
 
 # Create secrets directory with restricted permissions
 mkdir -p "$SECRETS_DIR"
@@ -48,6 +48,32 @@ log_error() {
 log_section() {
     echo -e "${PURPLE}🔧 $1${NC}"
 }
+
+log_debug() {
+    if [[ "${DEBUG:-false}" == "true" ]]; then
+        echo -e "${BLUE}🔍 $1${NC}"
+    fi
+}
+
+check_role_assignment_exists() {
+    local object_id="$1"
+    local role_name="$2"
+    local scope="$3"
+    
+    log_info "Checking if role '$role_name' is assigned..."
+    
+    # Check for existing assignment using correct parameter name
+    if az role assignment list \
+        --assignee-principal-id "$object_id" \
+        --role "$role_name" \
+        --scope "$scope" \
+        --query "[?principalId=='$object_id'].{id:id}" \
+        --output tsv &>/dev/null; then
+        return 0
+    fi
+    return 1
+}
+
 
 # Error handling
 error_exit() {
@@ -263,6 +289,20 @@ check_github_auth() {
     fi
 }
 
+# Add this function before create_custom_roles()
+check_role_exists() {
+    local role_name="$1"
+    local role_output
+    
+    role_output=$(az role definition list --name "$role_name" --query "[0]" -o json 2>/dev/null)
+    
+    if [[ -n "$role_output" && "$role_output" != "null" ]]; then
+        log_info "Role '$role_name' already exists"
+        return 0
+    fi
+    return 1
+}
+
 # Create custom roles
 create_custom_roles() {
     log_section "Creating Custom Azure Roles"
@@ -270,8 +310,12 @@ create_custom_roles() {
     local subscription_id="${AZURE_SUBSCRIPTION_ID}"
     
     # Network Infrastructure Contributor Role
-    log_info "Creating Network Infrastructure Contributor role..."
-    local network_role_def=$(cat <<EOF
+    log_info "Checking Network Infrastructure Contributor role..."
+    if az role definition list --name "Network Infrastructure Contributor" --query "[0].name" -o tsv &>/dev/null; then
+        log_info "Network Infrastructure Contributor role already exists - skipping creation"
+    else
+        log_info "Creating Network Infrastructure Contributor role..."
+        local network_role_def=$(cat <<EOF
 {
     "Name": "Network Infrastructure Contributor",
     "IsCustom": true,
@@ -303,36 +347,30 @@ create_custom_roles() {
 }
 EOF
 )
-    
-    echo "$network_role_def" | az role definition create --role-definition @- 2>/dev/null || log_warning "Network Infrastructure Contributor role may already exist"
-    
+        echo "$network_role_def" | az role definition create --role-definition @- 2>/dev/null || log_info "Role exists - continuing"
+    fi
+
     # AI Foundry Contributor Role
-    log_info "Creating AI Foundry Contributor role..."
-    local ai_role_def=$(cat <<EOF
+    log_info "Checking AI Foundry Contributor role..."
+    if az role definition list --name "AI Foundry Contributor" --query "[0].name" -o tsv &>/dev/null; then
+        log_info "AI Foundry Contributor role already exists - skipping creation"
+    else
+        log_info "Creating AI Foundry Contributor role..."
+        local ai_role_def=$(cat <<EOF
 {
     "Name": "AI Foundry Contributor",
     "IsCustom": true,
-    "Description": "Manage Azure AI services, Cognitive Services, Machine Learning, and AI foundry resources with least privilege access",
+    "Description": "Manage AI resources and compute with least privilege access",
     "Actions": [
-        "Microsoft.CognitiveServices/*",
         "Microsoft.MachineLearningServices/*",
-        "Microsoft.Ai/*",
-        "Microsoft.Search/*",
-        "Microsoft.DocumentDB/databaseAccounts/*",
-        "Microsoft.KeyVault/vaults/secrets/read",
-        "Microsoft.KeyVault/vaults/keys/read",
-        "Microsoft.Storage/storageAccounts/read",
-        "Microsoft.Storage/storageAccounts/listKeys/action",
-        "Microsoft.Storage/storageAccounts/blobServices/*",
+        "Microsoft.ContainerRegistry/*",
+        "Microsoft.CognitiveServices/*",
+        "Microsoft.Compute/virtualMachines/read",
         "Microsoft.Resources/deployments/*",
-        "Microsoft.Resources/subscriptions/resourceGroups/read",
-        "Microsoft.Insights/*"
+        "Microsoft.Resources/subscriptions/resourceGroups/read"
     ],
     "NotActions": [],
-    "DataActions": [
-        "Microsoft.CognitiveServices/accounts/*",
-        "Microsoft.Storage/storageAccounts/blobServices/containers/blobs/*"
-    ],
+    "DataActions": [],
     "NotDataActions": [],
     "AssignableScopes": [
         "/subscriptions/$subscription_id"
@@ -340,38 +378,31 @@ EOF
 }
 EOF
 )
-    
-    echo "$ai_role_def" | az role definition create --role-definition @- 2>/dev/null || log_warning "AI Foundry Contributor role may already exist"
-    
+        echo "$ai_role_def" | az role definition create --role-definition @- 2>/dev/null || log_info "Role exists - continuing"
+    fi
+
     # VM Image Builder Contributor Role
-    log_info "Creating VM Image Builder Contributor role..."
-    local vm_role_def=$(cat <<EOF
+    log_info "Checking VM Image Builder Contributor role..."
+    if az role definition list --name "VM Image Builder Contributor" --query "[0].name" -o tsv &>/dev/null; then
+        log_info "VM Image Builder Contributor role already exists - skipping creation"
+    else
+        log_info "Creating VM Image Builder Contributor role..."
+        local vm_role_def=$(cat <<EOF
 {
     "Name": "VM Image Builder Contributor",
     "IsCustom": true,
-    "Description": "Manage virtual machines, VM images, disks, and related compute resources with least privilege access",
+    "Description": "Manage VM images and compute resources with least privilege access",
     "Actions": [
-        "Microsoft.Compute/virtualMachines/*",
-        "Microsoft.Compute/virtualMachineScaleSets/*",
         "Microsoft.Compute/images/*",
-        "Microsoft.Compute/galleries/*",
+        "Microsoft.Compute/virtualMachines/read",
         "Microsoft.Compute/disks/*",
-        "Microsoft.Compute/snapshots/*",
-        "Microsoft.Compute/availabilitySets/*",
+        "Microsoft.Storage/storageAccounts/*",
         "Microsoft.Network/networkInterfaces/read",
-        "Microsoft.Network/networkInterfaces/write",
-        "Microsoft.Network/networkInterfaces/join/action",
-        "Microsoft.Storage/storageAccounts/read",
-        "Microsoft.Storage/storageAccounts/listKeys/action",
-        "Microsoft.KeyVault/vaults/secrets/read",
         "Microsoft.Resources/deployments/*",
-        "Microsoft.Resources/subscriptions/resourceGroups/read",
-        "Microsoft.Insights/*"
+        "Microsoft.Resources/subscriptions/resourceGroups/read"
     ],
     "NotActions": [],
-    "DataActions": [
-        "Microsoft.Storage/storageAccounts/blobServices/containers/blobs/*"
-    ],
+    "DataActions": [],
     "NotDataActions": [],
     "AssignableScopes": [
         "/subscriptions/$subscription_id"
@@ -379,20 +410,16 @@ EOF
 }
 EOF
 )
-    
-    echo "$vm_role_def" | az role definition create --role-definition @- 2>/dev/null || log_warning "VM Image Builder Contributor role may already exist"
-    
-    log_success "Custom roles created successfully"
-}
+        echo "$vm_role_def" | az role definition create --role-definition @- 2>/dev/null || log_info "Role exists - continuing"
+    fi
 
-# Create Terraform Storage Access Role
-create_terraform_storage_role() {
-    log_section "Creating Terraform Storage Access Role"
-    
-    local subscription_id="${AZURE_SUBSCRIPTION_ID}"
-    
-    log_info "Creating Terraform Storage Contributor role..."
-    local terraform_storage_role_def=$(cat <<EOF
+    # Terraform Storage Contributor Role
+    log_info "Checking Terraform Storage Contributor role..."
+    if az role definition list --name "Terraform Storage Contributor" --query "[0].name" -o tsv &>/dev/null; then
+        log_info "Terraform Storage Contributor role already exists - skipping creation"
+    else
+        log_info "Creating Terraform Storage Contributor role..."
+        local terraform_storage_role_def=$(cat <<EOF
 {
     "Name": "Terraform Storage Contributor",
     "IsCustom": true,
@@ -416,12 +443,12 @@ create_terraform_storage_role() {
 }
 EOF
 )
-    
-    echo "$terraform_storage_role_def" | az role definition create --role-definition @- 2>/dev/null || \
-        log_warning "Terraform Storage Contributor role may already exist"
-    
-    log_success "Terraform Storage role created successfully"
+        echo "$terraform_storage_role_def" | az role definition create --role-definition @- 2>/dev/null || log_info "Role exists - continuing"
+    fi
+
+    log_success "Custom roles verification complete"
 }
+
 
 # Add this function to check for existing service principals
 check_existing_sp() {
@@ -526,27 +553,45 @@ create_service_principal() {
     fi
     
     # Create role assignment using object ID with retries
+    log_info "Creating role assignment..."
     local role_assigned=false
-    retry_count=0
+    local retry_count=0
+    local max_retries=5
+
     while [[ $retry_count -lt $max_retries ]]; do
-        if az role assignment create \
+        # First check if role assignment exists
+        if az role assignment list \
             --assignee-object-id "$object_id" \
-            --assignee-principal-type ServicePrincipal \
             --role "$role_name" \
-            --scope "$scope" 2>/dev/null; then
+            --scope "$scope" \
+            --query "[?principalId=='$object_id'].{id:id}" \
+            --output tsv &>/dev/null; then
+            log_success "Role assignment exists or was created successfully"
             role_assigned=true
             break
         fi
+
+        # If not found, try to create it
+        log_info "Attempt $((retry_count + 1))/$max_retries to create role assignment..."
+        az role assignment create \
+            --assignee-object-id "$object_id" \
+            --assignee-principal-type ServicePrincipal \
+            --role "$role_name" \
+            --scope "$scope" 2>/dev/null
+
+        # Wait for potential replication
         ((retry_count++))
-        log_info "Retrying role assignment (attempt $retry_count/$max_retries)..."
-        sleep 30
+        if [[ $retry_count -lt $max_retries ]]; then
+            log_info "Waiting for role assignment to propagate..."
+            sleep 30
+        fi
     done
 
     if [[ "$role_assigned" != "true" ]]; then
         log_warning "Role assignment failed after $max_retries attempts. Manual assignment needed:"
         echo "az role assignment create --assignee-object-id $object_id --role \"$role_name\" --scope \"$scope\""
     fi
-
+    
     # Extract required values
     local tenant_id client_id client_secret
     tenant_id=$(echo "$sp_output" | jq -r '.tenant // empty')
@@ -649,15 +694,23 @@ create_all_service_principals() {
     
     if [ -n "$aks_sp" ]; then
         # Add Network Contributor role for AKS networking (scoped to AKS RG)
-        local aks_client_id
+        local aks_client_id object_id
         aks_client_id=$(echo "$aks_sp" | jq -r '.clientId')
         if [[ -n "$aks_client_id" && "$aks_client_id" != "null" ]]; then
-            az role assignment create \
-                --assignee-object-id "$aks_client_id" \
-                --assignee-principal-type ServicePrincipal \
-                --role "Network Contributor" \
-                --scope "/subscriptions/${AZURE_SUBSCRIPTION_ID}/resourceGroups/${AKS_RESOURCE_GROUP}" \
-                || log_warning "Failed to assign Network Contributor role to AKS SP"
+            object_id=$(az ad sp show --id "$aks_client_id" --query "id" -o tsv)
+            local aks_scope="/subscriptions/${AZURE_SUBSCRIPTION_ID}/resourceGroups/${AKS_RESOURCE_GROUP}"
+            
+            if ! check_role_assignment_exists "$object_id" "Network Contributor" "$aks_scope"; then
+                log_info "Adding Network Contributor role to AKS SP..."
+                az role assignment create \
+                    --assignee-object-id "$object_id" \
+                    --assignee-principal-type ServicePrincipal \
+                    --role "Network Contributor" \
+                    --scope "$aks_scope" \
+                    || log_warning "Failed to assign Network Contributor role to AKS SP"
+            else
+                log_info "Network Contributor role already assigned to AKS SP"
+            fi
         else
             log_warning "Could not extract valid client ID for AKS SP"
         fi
@@ -990,6 +1043,83 @@ prompt_for_variables() {
     export RESOURCE_PREFIX VM_RESOURCE_GROUP AKS_RESOURCE_GROUP LOCATION
 }
 
+# Add this function after create_custom_roles()
+check_tf_storage_exists() {
+    local storage_name="$1"
+    local resource_group="$2"
+    
+    log_info "Checking if Terraform storage account exists..."
+    
+    if az storage account show \
+        --name "$storage_name" \
+        --resource-group "$resource_group" \
+        --query "name" -o tsv &>/dev/null; then
+        return 0
+    fi
+    return 1
+}
+
+create_tf_storage() {
+    log_section "Setting up Terraform State Storage"
+    
+    local storage_name="${TF_STATE_STORAGE_ACCOUNT_NAME:-secconftfstate}"
+    local container_name="${TF_STATE_CONTAINER_NAME:-tfstate}"
+    local resource_group="${TF_STATE_RESOURCE_GROUP:-secconf-tfstate-rg}"
+    local location="${LOCATION:-eastus}"
+    
+    # Check if storage account exists
+    if check_tf_storage_exists "$storage_name" "$resource_group"; then
+        log_info "Terraform storage account '$storage_name' already exists - skipping creation"
+        
+        # Ensure container exists
+        log_info "Checking state container..."
+        if az storage container show \
+            --account-name "$storage_name" \
+            --name "$container_name" \
+            --auth-mode login \
+            --query "name" -o tsv &>/dev/null; then
+            log_info "State container '$container_name' exists - skipping creation"
+        else
+            log_info "Creating state container '$container_name'..."
+            az storage container create \
+                --account-name "$storage_name" \
+                --name "$container_name" \
+                --auth-mode login || error_exit "Failed to create state container"
+        fi
+    else
+        # Create resource group if it doesn't exist
+        log_info "Checking resource group..."
+        az group create \
+            --name "$resource_group" \
+            --location "$location" || error_exit "Failed to create resource group"
+            
+        # Create storage account
+        log_info "Creating storage account..."
+        az storage account create \
+            --name "$storage_name" \
+            --resource-group "$resource_group" \
+            --location "$location" \
+            --sku Standard_LRS \
+            --kind StorageV2 \
+            --https-only true \
+            --min-tls-version TLS1_2 || error_exit "Failed to create storage account"
+            
+        # Create container
+        log_info "Creating state container..."
+        az storage container create \
+            --account-name "$storage_name" \
+            --name "$container_name" \
+            --auth-mode login || error_exit "Failed to create state container"
+    fi
+    
+    # Export variables for later use
+    export TF_STATE_STORAGE_ACCOUNT_NAME="$storage_name"
+    export TF_STATE_CONTAINER_NAME="$container_name"
+    export TF_STATE_RESOURCE_GROUP="$resource_group"
+    
+    log_success "Terraform state storage setup complete"
+}
+
 # Main setup flow
 main() {
     log_section "Azure Initial Setup"
@@ -1000,17 +1130,16 @@ main() {
     # Check Azure authentication
     check_azure_auth
     
-    # Prompt for variables if not set
+    # Prompt for variables
     prompt_for_variables
-    
-    # Validate variables are set
-    check_required_variables
     
     # Create custom roles
     create_custom_roles
     
+    # Setup Terraform storage (new location)
+    create_tf_storage
+    
     # Create service principals
-    create_terraform_storage_role
     create_all_service_principals
     
     # Configure GitHub
@@ -1034,3 +1163,14 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     
     main "$@"
 fi
+
+display_next_steps() {
+    log_section "Next Steps"
+    echo
+    echo "1. Review the service principal credentials in: $SECRETS_DIR"
+    echo "2. Configure GitHub environments in the web interface"
+    echo "3. Test the GitHub Actions workflows"
+    echo "4. Store a backup of the credentials in a secure location"
+    echo
+    echo "For more information, see the project documentation"
+}
