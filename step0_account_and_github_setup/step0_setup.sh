@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # Colors for output
 RED='\033[0;31m'
@@ -8,7 +8,9 @@ BLUE='\033[0;34m'
 NC='\033[0m'
 
 # Setup working directory
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
+echo "Script directory: $SCRIPT_DIR"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 SECRETS_DIR="$HOME/.config/azure-setup"
 

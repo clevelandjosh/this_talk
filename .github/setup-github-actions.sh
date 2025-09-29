@@ -17,6 +17,13 @@ SECRETS_DIR="$HOME/.config/azure-setup"  # Store outside repo
 SECRETS_FILE="$SECRETS_DIR/github-secrets.env"
 SP_FILE="$SECRETS_DIR/service-principals.json"
 
+# Declare variables with defaults
+declare -x RESOURCE_PREFIX=""
+declare -x VM_RESOURCE_GROUP=""
+declare -x AKS_RESOURCE_GROUP=""
+declare -x LOCATION=""
+declare -x AZURE_SUBSCRIPTION_ID=""
+
 # Create secrets directory with restricted permissions
 mkdir -p "$SECRETS_DIR"
 chmod 700 "$SECRETS_DIR"
@@ -378,86 +385,227 @@ EOF
     log_success "Custom roles created successfully"
 }
 
+# Create Terraform Storage Access Role
+create_terraform_storage_role() {
+    log_section "Creating Terraform Storage Access Role"
+    
+    local subscription_id="${AZURE_SUBSCRIPTION_ID}"
+    
+    log_info "Creating Terraform Storage Contributor role..."
+    local terraform_storage_role_def=$(cat <<EOF
+{
+    "Name": "Terraform Storage Contributor",
+    "IsCustom": true,
+    "Description": "Access to manage Terraform state in Azure Storage",
+    "Actions": [
+        "Microsoft.Storage/storageAccounts/blobServices/containers/read",
+        "Microsoft.Storage/storageAccounts/blobServices/containers/write",
+        "Microsoft.Storage/storageAccounts/blobServices/containers/blobs/read",
+        "Microsoft.Storage/storageAccounts/blobServices/containers/blobs/write",
+        "Microsoft.Storage/storageAccounts/blobServices/containers/blobs/delete",
+        "Microsoft.Storage/storageAccounts/blobServices/containers/blobs/add/action"
+    ],
+    "NotActions": [],
+    "DataActions": [
+        "Microsoft.Storage/storageAccounts/blobServices/containers/blobs/*"
+    ],
+    "NotDataActions": [],
+    "AssignableScopes": [
+        "/subscriptions/$subscription_id"
+    ]
+}
+EOF
+)
+    
+    echo "$terraform_storage_role_def" | az role definition create --role-definition @- 2>/dev/null || \
+        log_warning "Terraform Storage Contributor role may already exist"
+    
+    log_success "Terraform Storage role created successfully"
+}
 
-
-# Create service principal with specific role
-create_service_principal() {
+# Add this function to check for existing service principals
+check_existing_sp() {
     local sp_name="$1"
     local role_name="$2"
+    local scope="$3"
+    
+    # Get today's date in YYYYMMDD format
+    local today=$(date +%Y%m%d)
+    
+    # Check if SP exists in Azure
+    local existing_sp
+    existing_sp=$(az ad sp list --display-name "$sp_name" --query "[0]" -o json 2>/dev/null)
+    
+    if [[ -n "$existing_sp" && "$existing_sp" != "null" ]]; then
+        log_info "Found existing service principal: $sp_name"
+        
+        # Get the SP's object ID
+        local object_id
+        object_id=$(echo "$existing_sp" | jq -r '.id')
+        
+        # Check if role assignment exists
+        local role_assignment
+        role_assignment=$(az role assignment list \
+            --assignee-object-id "$object_id" \
+            --role "$role_name" \
+            --scope "$scope" \
+            --query "[0]" -o json 2>/dev/null)
+        
+        if [[ -n "$role_assignment" && "$role_assignment" != "null" ]]; then
+            log_success "Existing service principal has correct role assignment"
+            return 0
+        else
+            log_warning "Existing service principal found but missing role assignment"
+            return 1
+        fi
+    fi
+    
+    return 1
+}
+
+# Modify create_service_principal to use date-only naming
+create_service_principal() {
+    local base_name="$1"
+    local role_name="$2"
     local description="$3"
-    local scope="${4:-/subscriptions/${AZURE_SUBSCRIPTION_ID}}"  # Default to subscription scope
+    local scope="${4:-/subscriptions/${AZURE_SUBSCRIPTION_ID}}"
+    
+    # Create SP name with date only (no time)
+    local date_suffix=$(date +%Y%m%d)
+    local sp_name="${base_name}-${date_suffix}"
+    
+    # Check if SP already exists with correct roles
+    if check_existing_sp "$sp_name" "$role_name" "$scope"; then
+        log_info "Skipping creation of $sp_name - already exists with correct roles"
+        return 0
+    fi
     
     log_info "Creating service principal: $sp_name"
     log_info "Role: $role_name"
     log_info "Description: $description"
     log_info "Scope: $scope"
     
-    if ! confirm "Create this service principal?"; then
-        log_warning "Skipping service principal: $sp_name"
-        return 0
+    # Create service principal first
+    local sp_output
+    if ! sp_output=$(az ad sp create-for-rbac \
+        --name "$sp_name" \
+        --skip-assignment \
+        --output json); then
+        error_exit "Failed to create service principal: $sp_name"
+    fi
+
+    # Debug output
+    log_debug "Raw SP output: $sp_output"
+
+    # Validate JSON output
+    if ! echo "$sp_output" | jq . >/dev/null 2>&1; then
+        error_exit "Invalid JSON output from az command: $sp_output"
+    fi
+
+    # Extract service principal ID and object ID
+    local sp_id object_id
+    sp_id=$(echo "$sp_output" | jq -r '.appId // empty')
+    if [[ -z "$sp_id" ]]; then
+        error_exit "Failed to extract appId from service principal creation output"
     fi
     
-    local sp_output
-    sp_output=$(az ad sp create-for-rbac \
-        --name "$sp_name" \
-        --role "$role_name" \
-        --scopes "$scope" \
-        --sdk-auth 2>/dev/null) || error_exit "Failed to create service principal: $sp_name"
+    # Get object ID for the service principal with retries
+    local retry_count=0
+    local max_retries=5
+    while [[ $retry_count -lt $max_retries ]]; do
+        if object_id=$(az ad sp show --id "$sp_id" --query "id" -o tsv 2>/dev/null); then
+            break
+        fi
+        ((retry_count++))
+        log_info "Waiting for service principal propagation (attempt $retry_count/$max_retries)..."
+        sleep 30
+    done
+
+    if [[ -z "$object_id" ]]; then
+        error_exit "Failed to get object ID for service principal after $max_retries attempts"
+    fi
     
-    # Extract credentials
-    local client_id=$(echo "$sp_output" | jq -r '.clientId')
-    local client_secret=$(echo "$sp_output" | jq -r '.clientSecret')
-    local tenant_id=$(echo "$sp_output" | jq -r '.tenantId')
-    
-    # Store in SP file
-    local sp_record=$(cat <<EOF
+    # Create role assignment using object ID with retries
+    local role_assigned=false
+    retry_count=0
+    while [[ $retry_count -lt $max_retries ]]; do
+        if az role assignment create \
+            --assignee-object-id "$object_id" \
+            --assignee-principal-type ServicePrincipal \
+            --role "$role_name" \
+            --scope "$scope" 2>/dev/null; then
+            role_assigned=true
+            break
+        fi
+        ((retry_count++))
+        log_info "Retrying role assignment (attempt $retry_count/$max_retries)..."
+        sleep 30
+    done
+
+    if [[ "$role_assigned" != "true" ]]; then
+        log_warning "Role assignment failed after $max_retries attempts. Manual assignment needed:"
+        echo "az role assignment create --assignee-object-id $object_id --role \"$role_name\" --scope \"$scope\""
+    fi
+
+    # Extract required values
+    local tenant_id client_id client_secret
+    tenant_id=$(echo "$sp_output" | jq -r '.tenant // empty')
+    client_id="$sp_id"
+    client_secret=$(echo "$sp_output" | jq -r '.password // empty')
+
+    # Validate all required values are present
+    if [[ -z "$tenant_id" || -z "$client_id" || -z "$client_secret" ]]; then
+        error_exit "Failed to extract required credentials from service principal output"
+    fi
+
+    # Create SDK auth format JSON
+    local auth_json
+    auth_json=$(cat <<EOF
 {
-    "name": "$sp_name",
-    "description": "$description",
-    "role": "$role_name",
     "clientId": "$client_id",
     "clientSecret": "$client_secret",
     "tenantId": "$tenant_id",
-    "subscriptionId": "$subscription_id",
-    "createdAt": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+    "subscriptionId": "$AZURE_SUBSCRIPTION_ID",
+    "activeDirectoryEndpointUrl": "https://login.microsoftonline.com",
+    "resourceManagerEndpointUrl": "https://management.azure.com/",
+    "activeDirectoryGraphResourceId": "https://graph.windows.net/",
+    "sqlManagementEndpointUrl": "https://management.core.windows.net:8443/",
+    "galleryEndpointUrl": "https://gallery.azure.com/",
+    "managementEndpointUrl": "https://management.core.windows.net/"
 }
 EOF
 )
-    
-    # Initialize or append to SP file
-    if [ ! -f "$SP_FILE" ] || [ ! -s "$SP_FILE" ]; then
-        echo '{"service_principals": []}' > "$SP_FILE"
-    fi
-    
-    # Add new SP to file
-    jq --argjson sp "$sp_record" '.service_principals += [$sp]' "$SP_FILE" > "${SP_FILE}.tmp" && mv "${SP_FILE}.tmp" "$SP_FILE"
-    
-    log_success "Service principal created: $sp_name (Client ID: $client_id)"
-    
-    # Return the credentials for immediate use
-    echo "$sp_output"
+
+    # Return the formatted JSON
+    echo "$auth_json"
 }
 
 # Create all service principals
 create_all_service_principals() {
     log_section "Creating Service Principals with Least Privilege Access"
     
-    local timestamp=$(date +%Y%m%d-%H%M%S)
+    if ! confirm "This will create or update service principals with specific roles. Continue?"; then
+        error_exit "Service principal creation cancelled"
+    fi
+    
     local project_prefix="${RESOURCE_PREFIX:-secconf}"
     
-    # Initialize SP file
-    echo '{"service_principals": []}' > "$SP_FILE"
+    # Initialize SP file if it doesn't exist
+    if [[ ! -f "$SP_FILE" ]]; then
+        echo '{"service_principals":[]}' > "$SP_FILE"
+    fi
     
-    # 1. Terraform State Manager - Storage Blob Data Contributor
+    # 1. Terraform State Manager
     log_info "1/6 Creating Terraform State Manager..."
-    local tf_state_sp=$(create_service_principal \
-        "$project_prefix-terraform-state-$timestamp" \
+    local tf_sp=$(create_service_principal \
+        "$project_prefix-terraform-state" \
         "Storage Blob Data Contributor" \
-        "Manages Terraform state files in blob storage with read/write access to containers and blobs only")
+        "Manages Terraform state storage" \
+        "/subscriptions/${AZURE_SUBSCRIPTION_ID}")
     
-    if [ -n "$tf_state_sp" ]; then
-        export TF_STATE_CLIENT_ID=$(echo "$tf_state_sp" | jq -r '.clientId')
-        export TF_STATE_CLIENT_SECRET=$(echo "$tf_state_sp" | jq -r '.clientSecret')
+    if [ -n "$tf_sp" ]; then
+        export TF_STATE_CLIENT_ID=$(echo "$tf_sp" | jq -r '.clientId')
+        export TF_STATE_CLIENT_SECRET=$(echo "$tf_sp" | jq -r '.clientSecret')
         echo "TF_STATE_CLIENT_ID=\"$TF_STATE_CLIENT_ID\"" >> "$SECRETS_FILE"
         echo "TF_STATE_CLIENT_SECRET=\"$TF_STATE_CLIENT_SECRET\"" >> "$SECRETS_FILE"
     fi
@@ -465,7 +613,7 @@ create_all_service_principals() {
     # 2. Network Infrastructure Manager - Custom Network Role
     log_info "2/6 Creating Network Infrastructure Manager..."
     local network_sp=$(create_service_principal \
-        "$project_prefix-network-infra-$timestamp" \
+        "$project_prefix-network-infra" \
         "Network Infrastructure Contributor" \
         "Manages VNets, subnets, firewalls, load balancers, and all networking components")
     
@@ -479,7 +627,7 @@ create_all_service_principals() {
     # 3. AI Foundry Manager - Custom AI Role
     log_info "3/6 Creating AI Foundry Manager..."
     local ai_sp=$(create_service_principal \
-        "$project_prefix-ai-foundry-$timestamp" \
+        "$project_prefix-ai-foundry" \
         "AI Foundry Contributor" \
         "Manages Azure AI services, Cognitive Services, Machine Learning workspaces and AI foundry resources")
     
@@ -494,19 +642,25 @@ create_all_service_principals() {
     log_info "4/6 Creating AKS Manager..."
     ensure_resource_group "$AKS_RESOURCE_GROUP"
     local aks_sp=$(create_service_principal \
-        "$project_prefix-aks-manager-$timestamp" \
+        "$project_prefix-aks-manager" \
         "Azure Kubernetes Service Contributor" \
         "Manages AKS clusters, node pools, and Kubernetes workloads" \
         "/subscriptions/${AZURE_SUBSCRIPTION_ID}/resourceGroups/${AKS_RESOURCE_GROUP}")
     
     if [ -n "$aks_sp" ]; then
         # Add Network Contributor role for AKS networking (scoped to AKS RG)
-        local aks_client_id=$(echo "$aks_sp" | jq -r '.clientId')
-        az role assignment create \
-            --assignee "$aks_client_id" \
-            --role "Network Contributor" \
-            --scope "/subscriptions/${AZURE_SUBSCRIPTION_ID}/resourceGroups/${AKS_RESOURCE_GROUP}" \
-            || log_warning "Failed to assign Network Contributor role to AKS SP"
+        local aks_client_id
+        aks_client_id=$(echo "$aks_sp" | jq -r '.clientId')
+        if [[ -n "$aks_client_id" && "$aks_client_id" != "null" ]]; then
+            az role assignment create \
+                --assignee-object-id "$aks_client_id" \
+                --assignee-principal-type ServicePrincipal \
+                --role "Network Contributor" \
+                --scope "/subscriptions/${AZURE_SUBSCRIPTION_ID}/resourceGroups/${AKS_RESOURCE_GROUP}" \
+                || log_warning "Failed to assign Network Contributor role to AKS SP"
+        else
+            log_warning "Could not extract valid client ID for AKS SP"
+        fi
         
         export AKS_CLIENT_ID="$aks_client_id"
         export AKS_CLIENT_SECRET=$(echo "$aks_sp" | jq -r '.clientSecret')
@@ -519,7 +673,7 @@ create_all_service_principals() {
     log_info "5/6 Creating VM Image Builder..."
     ensure_resource_group "$VM_RESOURCE_GROUP"
     local vm_sp=$(create_service_principal \
-        "$project_prefix-vm-builder-$timestamp" \
+        "$project_prefix-vm-builder" \
         "VM Image Builder Contributor" \
         "Manages virtual machines, VM images, disks, and compute resources for image building" \
         "/subscriptions/${AZURE_SUBSCRIPTION_ID}/resourceGroups/${VM_RESOURCE_GROUP}")
@@ -529,13 +683,13 @@ create_all_service_principals() {
         export VM_CLIENT_SECRET=$(echo "$vm_sp" | jq -r '.clientSecret')
         echo "VM_CLIENT_ID=\"$VM_CLIENT_ID\"" >> "$SECRETS_FILE"
         echo "VM_CLIENT_SECRET=\"$VM_CLIENT_SECRET\"" >> "$SECRETS_FILE"
-        echo "VM_RESOURCE_GROUP=\"$VM_RESOURCE_GROUP\"" >> "$SECRETS_FILE"
+        echo "VM_RESOURCE_GROUP=\"$SECRETS_FILE\"" >> "$SECRETS_FILE"
     fi
     
     # 6. Resource Group Manager - Contributor (at subscription level for RG management)
     log_info "6/6 Creating Resource Group Manager..."
     local rg_sp=$(create_service_principal \
-        "$project_prefix-resource-groups-$timestamp" \
+        "$project_prefix-resource-groups" \
         "Contributor" \
         "Manages resource groups and subscription-level resources with full contributor access")
     
@@ -547,7 +701,7 @@ create_all_service_principals() {
     fi
     
     # Store tenant info
-    export AZURE_TENANT_ID=$(echo "$tf_state_sp" | jq -r '.tenantId')
+    export AZURE_TENANT_ID=$(echo "$tf_sp" | jq -r '.tenantId')
     echo "AZURE_TENANT_ID=\"$AZURE_TENANT_ID\"" >> "$SECRETS_FILE"
     
     log_success "All service principals created successfully"
@@ -749,147 +903,125 @@ display_sp_summary() {
     echo "  - Use these credentials only for initial setup and secure maintenance"
 }
 
-# Main setup flow
-main() {
-    echo
-    echo "🚀 Multi-Service Principal GitHub Actions Setup"
-    echo "==============================================="
-    echo
-    echo "This script creates 6 service principals with least privilege access:"
-    echo "1. Terraform State Manager (blob storage only)"
-    echo "2. Network Infrastructure Manager (networking only)"
-    echo "3. AI Foundry Manager (AI services only)"
-    echo "4. AKS Manager (Kubernetes only)"
-    echo "5. VM Image Builder (compute only)"
-    echo "6. Resource Group Manager (resource groups only)"
-    echo
+# Check required variables
+check_required_variables() {
+    log_info "Checking required variables..."
     
-    # Initialize secrets file
-    rm -f "$SECRETS_FILE" "$SP_FILE"
-    touch "$SECRETS_FILE"
+    local missing_vars=()
     
-    # Step 1: Check dependencies
-    check_dependencies
-    
-    # Step 2: Check authentication
-    check_azure_auth
-    check_github_auth
-    
-    echo
-    log_info "Starting interactive configuration..."
-    
-    # Step 3: Collect Terraform backend configuration
-    echo
-    echo "📦 Terraform Backend Configuration"
-    echo "=================================="
-    prompt_input "Enter the Terraform state storage account name:" "TF_STATE_STORAGE_ACCOUNT_NAME" false "^[a-z0-9]{3,24}$" "secconftfstate"
-    prompt_input "Enter the Terraform state container name:" "TF_STATE_CONTAINER_NAME" false "^[a-z0-9-]{3,63}$" "tfstate"
-    prompt_input "Enter the Terraform state key (filename):" "TF_STATE_KEY" false ".*\.tfstate$" "terraform.tfstate"
-    prompt_input "Enter the resource group name:" "TF_STATE_RESOURCE_GROUP" false "^[a-zA-Z0-9_.-]*$" "secconf-rg"
-    
-    # Step 3.5: Network Configuration
-    echo
-    echo "🌐 Network Configuration"
-    echo "======================="
-    prompt_input "Enter the VNet address space (CIDR notation):" "VNET_ADDRESS_SPACE" false "^([0-9]{1,3}\.){3}[0-9]{1,3}/([0-9]|[1-2][0-9]|3[0-2])$" "10.209.96.0/19"
-    
-    # Step 4: Collect application configuration
-    echo
-    echo "🔧 Initial Azure Administrator Configuration"
-    echo "=========================================="
-    echo "Note: These credentials are used ONLY for initial setup to create less privileged service principals."
-    echo "WARNING: These credentials require Contributor rights and should NOT be stored in GitHub secrets."
-    echo "They will be stored locally in $SECRETS_DIR for reference."
-    echo
-    prompt_input "Enter Azure administrator email address:" "AZURE_ADMINISTRATOR" false "^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$" "admin@example.com"
-    prompt_input "Enter Azure administrator password:" "AZURE_ADMINISTRATOR_PASSWORD" true "^.{8,}$"
-    
-    # Optional configuration
-    echo
-    echo "⚙️  Optional Configuration"
-    echo "========================="
-    if confirm "Would you like to configure optional settings?"; then
-        prompt_input "Enter number of MCP servers:" "MCP_SERVER_COUNT" false "^[0-9]+$" "2"
-        prompt_input "Enter Azure region:" "LOCATION" false "^[a-z0-9 ]+$" "eastus"
-        prompt_input "Enter resource prefix:" "RESOURCE_PREFIX" false "^[a-zA-Z0-9-]{3,10}$" "secconf"
-    else
-        # Set defaults
-        export MCP_SERVER_COUNT="2"
-        export LOCATION="eastus"
-        export RESOURCE_PREFIX="secconf"
-        {
-            echo "MCP_SERVER_COUNT=\"2\""
-            echo "LOCATION=\"eastus\""
-            echo "RESOURCE_PREFIX=\"secconf\""
-        } >> "$SECRETS_FILE"
+    # Check subscription ID
+    if [[ -z "$AZURE_SUBSCRIPTION_ID" ]]; then
+        missing_vars+=("AZURE_SUBSCRIPTION_ID")
     fi
     
-    # Step 5: Create custom roles
+    # Check resource groups
+    if [[ -z "$VM_RESOURCE_GROUP" ]]; then
+        missing_vars+=("VM_RESOURCE_GROUP")
+    fi
+    
+    if [[ -z "$AKS_RESOURCE_GROUP" ]]; then
+        missing_vars+=("AKS_RESOURCE_GROUP")
+    fi
+    
+    if ((${#missing_vars[@]} > 0)); then
+        error_exit "Missing required variables: ${missing_vars[*]}"
+    fi
+    
+    log_success "All required variables are set"
+}
+
+# Prompt for variables
+prompt_for_variables() {
+    log_section "Checking Required Variables"
+
+    # Resource Prefix
+    if [[ -z "${RESOURCE_PREFIX}" ]]; then
+        echo
+        log_info "Enter resource prefix for naming Azure resources"
+        log_info "This will be used as a prefix for all resource names"
+        echo -e "${BLUE}Default: secconf${NC}"
+        read -r -p "Resource prefix [press Enter for default]: " input_prefix
+        RESOURCE_PREFIX="${input_prefix:-secconf}"
+    fi
+
+    # VM Resource Group
+    if [[ -z "${VM_RESOURCE_GROUP}" ]]; then
+        echo
+        log_info "Enter resource group name for VM workloads"
+        default_vm_rg="${RESOURCE_PREFIX}-vm-rg"
+        echo -e "${BLUE}Default: ${default_vm_rg}${NC}"
+        read -r -p "VM resource group [press Enter for default]: " input_vm_rg
+        VM_RESOURCE_GROUP="${input_vm_rg:-$default_vm_rg}"
+    fi
+
+    # AKS Resource Group
+    if [[ -z "${AKS_RESOURCE_GROUP}" ]]; then
+        echo
+        log_info "Enter resource group name for AKS workloads"
+        default_aks_rg="${RESOURCE_PREFIX}-aks-rg"
+        echo -e "${BLUE}Default: ${default_aks_rg}${NC}"
+        read -r -p "AKS resource group [press Enter for default]: " input_aks_rg
+        AKS_RESOURCE_GROUP="${input_aks_rg:-$default_aks_rg}"
+    fi
+
+    # Location
+    if [[ -z "${LOCATION}" ]]; then
+        echo
+        log_info "Enter Azure region for resource deployment"
+        echo -e "${BLUE}Default: eastus${NC}"
+        read -r -p "Azure region [press Enter for default]: " input_location
+        LOCATION="${input_location:-eastus}"
+    fi
+
+    # Display configured values
     echo
-    log_section "Azure Custom Roles"
+    log_success "Variables configured:"
+    echo -e "Resource Prefix: ${GREEN}${RESOURCE_PREFIX}${NC}"
+    echo -e "VM Resource Group: ${GREEN}${VM_RESOURCE_GROUP}${NC}"
+    echo -e "AKS Resource Group: ${GREEN}${AKS_RESOURCE_GROUP}${NC}"
+    echo -e "Location: ${GREEN}${LOCATION}${NC}"
+    echo
+
+    # Confirm values
+    if ! confirm "Are these values correct?"; then
+        error_exit "Setup cancelled - please run the script again with correct values"
+    fi
+
+    export RESOURCE_PREFIX VM_RESOURCE_GROUP AKS_RESOURCE_GROUP LOCATION
+}
+
+# Main setup flow
+main() {
+    log_section "Azure Initial Setup"
+    
+    # Check dependencies
+    check_dependencies
+    
+    # Check Azure authentication
+    check_azure_auth
+    
+    # Prompt for variables if not set
+    prompt_for_variables
+    
+    # Validate variables are set
+    check_required_variables
+    
+    # Create custom roles
     create_custom_roles
     
-    # Step 6: Create all service principals
-    echo
-    log_section "Service Principal Creation"
+    # Create service principals
+    create_terraform_storage_role
     create_all_service_principals
     
-    # Step 7: Configure storage permissions
-    echo
-    echo "📁 Storage Permissions"
-    echo "====================="
-    configure_storage_permissions
-    
-    # Step 8: Set GitHub secrets
-    echo
-    echo "🔑 GitHub Secrets"
-    echo "================="
+    # Configure GitHub
     set_github_secrets
-    
-    # Step 9: Create environments
-    echo
-    echo "🛡️  GitHub Environments"
-    echo "======================"
     create_github_environments
     
-    # Step 10: Display summary
-    echo
+    # Display summary
     display_sp_summary
     
-    # Final summary
-    echo
-    echo "🎉 Multi-Service Principal Setup Complete!"
-    echo "=========================================="
-    log_success "All service principals created with least privilege access"
-    echo
-    echo "📋 Summary:"
-    echo "  ✅ Dependencies verified"
-    echo "  ✅ Azure and GitHub authentication confirmed"
-    echo "  ✅ Custom roles created for specialized functions"
-    echo "  ✅ 6 service principals created with minimal required permissions"
-    echo "  ✅ Storage permissions configured"
-    echo "  ✅ GitHub secrets set for all service principals"
-    echo "  ✅ Environment setup instructions provided"
-    echo
-    echo "📁 Files created:"
-    echo "  - $SECRETS_FILE (contains all configuration)"
-    echo "  - $SP_FILE (detailed service principal information)"
-    echo
-    echo "🔒 Security Benefits:"
-    echo "  - Principle of least privilege enforced"
-    echo "  - Custom roles for specialized functions"
-    echo "  - No service principal has excessive permissions"
-    echo "  - Clear separation of concerns"
-    echo "  - Audit trail for all service principals"
-    echo
-    echo "🚀 Next steps:"
-    echo "  1. Review service principal assignments in Azure Portal"
-    echo "  2. Complete GitHub environment configuration"
-    echo "  3. Update Terraform configurations to use appropriate service principals"
-    echo "  4. Test workflows with different service principals for different operations"
-    echo "  5. Monitor service principal usage and adjust permissions if needed"
-    echo
-    log_info "Multi-Service Principal GitHub Actions CI/CD is ready to use!"
+    log_success "Initial setup complete!"
+    display_next_steps
 }
 
 # Script execution

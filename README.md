@@ -2,7 +2,7 @@
 
 This repository contains scripts and configurations for setting up Azure infrastructure using a two-step process with proper security controls and infrastructure as code.
 
-## Prerequisitesgit 
+## Prerequisites
 
 - Azure CLI installed and updated
 - GitHub CLI installed
